@@ -1,0 +1,581 @@
+\documentclass[11pt]{article}
+
+\usepackage{amsmath,amssymb}
+\usepackage{booktabs}
+\usepackage{geometry}
+\geometry{margin=1in}
+
+\title{Mixture-of-Experts (MoE) Theoretical Analysis Tool\\Formula Reference}
+\author{}
+\date{\today}
+
+\begin{document}
+\maketitle
+
+\section{Notation}
+
+\begin{tabular}{ll}
+\toprule
+Symbol & Meaning \\
+\midrule
+$P_{\text{total}}$ & Total model parameters \\
+$P_{\text{active}}$ & Parameters active for a single token \\
+$d_{\text{model}}$ & Hidden dimension \\
+$d_{\text{head}}$ & Per-head dimension \\
+$d_{\text{ff}}$ & Expert FFN hidden dim \\
+$d_{\text{ff,sh}}$ & Shared FFN hidden dim \\
+$L$ & Number of transformer layers \\
+$L_{\text{moe}}$ & Number of MoE layers (UI assumes $L_{\text{moe}}=L$) \\
+$V$ & Vocabulary size \\
+$S$ & Sequence length (tokens) \\
+$B$ & Batch size (sequences) \\
+$B_{\text{global}}$ & Global batch in tokens \\
+$E$ & Number of routed experts per MoE layer \\
+$K$ & Top-$K$ active experts per token \\
+$N_{\text{sh}}$ & Number of shared experts \\
+$H$ & \# attention heads \\
+$H_{\text{kv}}$ & \# KV heads (GQA) \\
+$b_{\text{train}}$ & Bytes per parameter (training) \\
+$b_{\text{inf}}$ & Bytes per parameter (inference) \\
+$T$ & Total training tokens \\
+$\mathrm{TP},\mathrm{EP},\mathrm{PP},\mathrm{DP}$ & Tensor, expert, pipeline, data parallel degrees \\
+$F_{\text{gpu}}$ & Per-GPU peak TFLOPs \\
+$U$ & Model FLOPs utilisation (MFU) \\
+$\mathrm{BW}_{\text{mem}}$ & Memory bandwidth (bytes/s) \\
+\bottomrule
+\end{tabular}
+
+\section{Parameter Counting (Overview Tab)}
+
+\subsection{Per-Component Parameter Counts}
+
+\paragraph{Embedding}
+\[
+P_{\text{embed}} = V \cdot d_{\text{model}}.
+\]
+
+\paragraph{Per-Layer Attention with GQA}
+Let $H$ be the number of attention heads, $H_{\text{kv}}$ the number of KV heads,
+and $d_{\text{head}}$ the per-head dim. Projections:
+\begin{align*}
+P_Q &= d_{\text{model}} \cdot (H d_{\text{head}}), \\
+P_K &= d_{\text{model}} \cdot (H_{\text{kv}} d_{\text{head}}), \\
+P_V &= d_{\text{model}} \cdot (H_{\text{kv}} d_{\text{head}}), \\
+P_O &= (H d_{\text{head}}) \cdot d_{\text{model}}.
+\end{align*}
+Per layer:
+\[
+P_{\text{attn,layer}} = P_Q + P_K + P_V + P_O.
+\]
+All layers:
+\[
+P_{\text{attn}} = L \cdot P_{\text{attn,layer}}.
+\]
+
+\paragraph{Per-Expert FFN (SwiGLU)}
+For both routed and shared experts, assuming SwiGLU:
+\[
+P_{\text{ffn,expert}} = 3 \cdot d_{\text{model}} \cdot d_{\text{ff}},
+\quad
+P_{\text{ffn,shared}} = 3 \cdot d_{\text{model}} \cdot d_{\text{ff,sh}}.
+\]
+
+\paragraph{Routed and Shared Experts}
+With $L_{\text{moe}}$ MoE layers (UI uses $L_{\text{moe}} = L$):
+\begin{align*}
+P_{\text{experts}} &= L_{\text{moe}} \cdot E \cdot P_{\text{ffn,expert}}, \\
+P_{\text{shared}}  &= L_{\text{moe}} \cdot N_{\text{sh}} \cdot P_{\text{ffn,shared}}.
+\end{align*}
+
+\paragraph{Gating / Router Parameters}
+Each MoE layer uses a linear router $d_{\text{model}} \to E$:
+\[
+P_{\text{gate,layer}} = d_{\text{model}} \cdot E,
+\quad
+P_{\text{gate}} = L_{\text{moe}} \cdot P_{\text{gate,layer}}.
+\]
+
+\paragraph{RMSNorm / LayerNorm Parameters}
+Assuming two norms per layer (pre-attention, pre-FFN):
+\[
+P_{\text{norm,layer}} = 2 \cdot d_{\text{model}},
+\quad
+P_{\text{norm}} = L \cdot P_{\text{norm,layer}}.
+\]
+
+\paragraph{Output Head}
+We count the output projection even if tied with embedding:
+\[
+P_{\text{out}} = V \cdot d_{\text{model}}.
+\]
+
+\subsection{Total and Active Parameters}
+
+\paragraph{Total Parameters}
+\[
+P_{\text{total}} =
+P_{\text{embed}} + P_{\text{attn}} + P_{\text{experts}} + P_{\text{shared}}
++ P_{\text{gate}} + P_{\text{norm}} + P_{\text{out}}.
+\]
+
+\paragraph{Active Parameters per Token}
+Only $K$ experts fire per MoE layer per token; shared experts,
+gating and norms are always active:
+\begin{align*}
+P_{\text{experts,active}} &= L_{\text{moe}} \cdot K \cdot P_{\text{ffn,expert}}, \\
+P_{\text{shared,active}}  &= P_{\text{shared}}, \\
+P_{\text{gate,active}}    &= P_{\text{gate}}, \\
+P_{\text{norm,active}}    &= P_{\text{norm}}.
+\end{align*}
+Then
+\[
+P_{\text{active}} =
+P_{\text{embed}} + P_{\text{attn}} +
+P_{\text{experts,active}} + P_{\text{shared,active}}
++ P_{\text{gate,active}} + P_{\text{norm,active}} + P_{\text{out}}.
+\]
+
+The equivalent dense baseline used in the UI has
+\[
+P_{\text{dense,eq}} = P_{\text{active}}.
+\]
+
+\section{Training Compute (FLOPs Tab)}
+
+\subsection{Attention FLOPs per Token with GQA}
+
+For sequence length $S$:
+
+Projection FLOPs per layer, per token:
+\begin{align*}
+F_Q &= 2 d_{\text{model}} (H d_{\text{head}}), \\
+F_K &= 2 d_{\text{model}} (H_{\text{kv}} d_{\text{head}}), \\
+F_V &= 2 d_{\text{model}} (H_{\text{kv}} d_{\text{head}}), \\
+F_O &= 2 (H d_{\text{head}}) d_{\text{model}},
+\end{align*}
+\[
+F_{\text{proj}} = F_Q + F_K + F_V + F_O.
+\]
+
+Attention scores and context:
+\[
+F_{\text{score}}   = 2 S H d_{\text{head}}, \quad
+F_{\text{context}} = 2 S H d_{\text{head}},
+\]
+\[
+F_{\text{attn,compute}} = F_{\text{score}} + F_{\text{context}}
+= 4 S H d_{\text{head}}.
+\]
+
+Per layer, per token:
+\[
+F_{\text{attn,layer}} = F_{\text{proj}} + F_{\text{attn,compute}}.
+\]
+All layers:
+\[
+F_{\text{attn}} = L \cdot F_{\text{attn,layer}}.
+\]
+
+When $H_{\text{kv}} = H$ and $H d_{\text{head}} = d_{\text{model}}$,
+this reduces to the classical
+\[
+F_{\text{attn,layer}} \approx
+8 d_{\text{model}}^2 + 4 S d_{\text{model}}.
+\]
+
+\subsection{MoE FFN and Gating FLOPs per Token}
+
+Per active expert (SwiGLU):
+\[
+F_{\text{ffn,expert,layer}} = 6 d_{\text{model}} d_{\text{ff}}.
+\]
+
+Per token across MoE layers:
+\begin{align*}
+F_{\text{ffn,moe}} &= L_{\text{moe}} \cdot K \cdot 6 d_{\text{model}} d_{\text{ff}}, \\
+F_{\text{ffn,shared}} &= L_{\text{moe}} \cdot N_{\text{sh}} \cdot 6 d_{\text{model}} d_{\text{ff,sh}}.
+\end{align*}
+
+Gating per layer:
+\[
+F_{\text{gate,layer}} = 2 d_{\text{model}} E,
+\quad
+F_{\text{gate}} = L_{\text{moe}} \cdot F_{\text{gate,layer}}.
+\]
+
+\subsection{Total Forward and Dense-Equivalent FLOPs}
+
+Total forward FLOPs per token:
+\[
+F_{\text{fwd,MoE}} = F_{\text{attn}} + F_{\text{ffn,moe}} + F_{\text{ffn,shared}} + F_{\text{gate}}.
+\]
+
+Dense-equivalent FFN FLOPs (all experts fire):
+\[
+F_{\text{ffn,dense}} = L_{\text{moe}} \cdot E \cdot 6 d_{\text{model}} d_{\text{ff}},
+\]
+\[
+F_{\text{fwd,dense}} =
+F_{\text{attn}} + F_{\text{ffn,dense}} + F_{\text{ffn,shared}}.
+\]
+
+MoE vs dense compute ratio:
+\[
+r_{\text{MoE/dense}} = \frac{F_{\text{fwd,MoE}}}{F_{\text{fwd,dense}}}.
+\]
+
+\subsection{Training FLOPs and GPU-Hours}
+
+Per-token training FLOPs (forward + backward + update):
+\[
+F_{\text{train,token}} \approx 3 \cdot F_{\text{fwd,MoE}}.
+\]
+
+Total for $T$ tokens:
+\[
+F_{\text{train,total}} = F_{\text{train,token}} \cdot T.
+\]
+
+Total GPU count:
+\[
+N_{\text{gpus}} = \mathrm{TP} \cdot \mathrm{EP} \cdot \mathrm{PP} \cdot \mathrm{DP}.
+\]
+
+Effective cluster throughput:
+\[
+F_{\text{eff}} = F_{\text{gpu}} \cdot U \cdot N_{\text{gpus}} \quad [\text{TFLOPs}].
+\]
+
+Time to train:
+\[
+t_{\text{train}} = \frac{F_{\text{train,total}}}{F_{\text{eff}} \cdot 10^{12}}
+\quad [\text{s}],
+\]
+and
+\[
+\text{GPU-hours} = \frac{t_{\text{train}} \cdot N_{\text{gpus}}}{3600}.
+\]
+
+\section{Training Memory}
+
+\subsection{Parameters, Optimizer, and Gradients}
+
+Let $P_{\text{total}}$ be total parameters. For training precision with bytes $b_{\text{train}}$:
+\[
+M_{\text{params}} = P_{\text{total}} \cdot b_{\text{train}}.
+\]
+
+Optimizer states:
+\[
+M_{\text{opt}} \approx
+\begin{cases}
+12 \, P_{\text{total}}, & \text{Adam with FP32 master},\\
+8 \, P_{\text{total}}, & \text{Adam with BF16/FP8 master or AdaFactor-like}.
+\end{cases}
+\]
+
+Gradient memory (configurable):
+\[
+M_{\text{grads}} =
+\begin{cases}
+4 \, P_{\text{total}}, & \text{FP32 gradients},\\
+2 \, P_{\text{total}}, & \text{BF16/FP16 gradients}.
+\end{cases}
+\]
+
+\subsection{Activation Memory}
+
+Approximate batch size in sequences:
+\[
+B_{\text{seq}} \approx \frac{B_{\text{global}}}{S}.
+\]
+
+Assuming storage at $b_{\text{train}}$ bytes/val:
+
+Attention activations (pre-softmax logits + post-softmax weights), if no FlashAttention:
+\[
+M_{\text{attn,act}} =
+2 \, B_{\text{seq}} \, H \, S^2 \, b_{\text{train}}.
+\]
+
+FFN activations (top-$K$ experts):
+\[
+M_{\text{ffn,act}} =
+B_{\text{seq}} \, S \, d_{\text{ff}} \, \max(K,1) \, b_{\text{train}}.
+\]
+
+Residual stream:
+\[
+M_{\text{resid}} =
+2 \, B_{\text{seq}} \, S \, d_{\text{model}} \, b_{\text{train}}.
+\]
+
+Per layer:
+\[
+M_{\text{act,layer}} = M_{\text{attn,act}} + M_{\text{ffn,act}} + M_{\text{resid}}.
+\]
+
+If FlashAttention is enabled, we set $M_{\text{attn,act}} \approx 0$ and only
+store $M_{\text{ffn,act}}$ and $M_{\text{resid}}$.
+
+\subsection{Checkpointing Modes}
+
+With $L$ layers:
+\begin{itemize}
+  \item \textbf{No checkpointing:}
+  \[
+  M_{\text{act,total}} = L \cdot M_{\text{act,layer}}.
+  \]
+
+  \item \textbf{Uniform $\sqrt{L}$ checkpointing:}
+  \[
+  M_{\text{act,total}} \approx 2 \cdot \left\lceil \sqrt{L} \right\rceil \cdot M_{\text{act,layer}}.
+  \]
+
+  \item \textbf{Selective recomputation (attention recomputed, FFN stored):}
+  \[
+  M_{\text{act,total}} \approx L \cdot (M_{\text{ffn,act}} + M_{\text{resid}}).
+  \]
+\end{itemize}
+
+\subsection{Peak and Per-GPU Memory}
+
+Peak training memory:
+\[
+M_{\text{peak}} = M_{\text{params}} + M_{\text{opt}} + M_{\text{grads}} + M_{\text{act,total}}.
+\]
+
+Sharding:
+\begin{align*}
+M_{\text{state,per-gpu}} &=
+\frac{M_{\text{params}} + M_{\text{opt}} + M_{\text{grads}}}
+{\max(\mathrm{TP} \cdot \mathrm{EP} \cdot \mathrm{PP}, 1)},\\
+M_{\text{act,per-gpu}} &=
+\frac{M_{\text{act,total}}}{\max(\mathrm{TP} \cdot \mathrm{PP}, 1)}, \\
+M_{\text{per-gpu}} &= M_{\text{state,per-gpu}} + M_{\text{act,per-gpu}}.
+\end{align*}
+
+\section{Inference Analysis}
+
+\subsection{FLOPs and Latency}
+
+Prefill per-token FLOPs use the forward formula with $S_{\text{in}}$:
+\[
+F_{\text{prefill,token}} = F_{\text{fwd,MoE}}(S_{\text{in}}).
+\]
+For batch size $B$:
+\[
+F_{\text{prefill,total}} =
+F_{\text{prefill,token}} \cdot B \cdot S_{\text{in}}.
+\]
+Prefill latency:
+\[
+t_{\text{prefill}} =
+\frac{F_{\text{prefill,total}}}{F_{\text{eff}} \cdot 10^{12}},
+\quad
+t_{\text{prefill,ms}} = 1000 t_{\text{prefill}}.
+\]
+
+Decode FLOPs per token reuse $F_{\text{fwd,MoE}}(S_{\text{in}})$.
+Decode latency is approximated as memory-bound:
+\[
+B_{\text{decode}} \approx P_{\text{active}} \cdot b_{\text{inf}},
+\quad
+t_{\text{decode}} \approx \frac{B_{\text{decode}}}{\mathrm{BW}_{\text{mem}}},
+\quad
+t_{\text{decode,ms}} = 1000 t_{\text{decode}},
+\]
+\[
+\text{tokens/s} \approx \frac{1}{t_{\text{decode}}}.
+\]
+
+\subsection{Weights and KV Cache}
+
+Weights:
+\[
+M_{\text{weights}} = P_{\text{total}} \cdot b_{\text{inf}}.
+\]
+
+KV cache per token:
+\[
+M_{\text{kv,token}} = 2 L H_{\text{kv}} d_{\text{head}} \, b_{\text{inf}}.
+\]
+
+For batch size $B$ and effective sequence length $S_{\text{tot}}$:
+\[
+M_{\text{kv,total}} = M_{\text{kv,token}} \cdot B \cdot S_{\text{tot}}.
+\]
+
+Total inference memory:
+\[
+M_{\text{inf,total}} =
+M_{\text{weights}} + M_{\text{kv,total}}.
+\]
+
+Given available memory $M_{\text{avail}}$ for KV (after weights), the
+KV-limited max batch size is
+\[
+B_{\max} \approx
+\left\lfloor \frac{M_{\text{avail}}}{M_{\text{kv,token}} \cdot S_{\text{tot}}} \right\rfloor.
+\]
+
+\subsection{KV vs Sequence-Length Curve}
+
+For sample sequence lengths $S_i$, the tool plots
+\[
+M_{\text{kv,total}}(S_i) = M_{\text{kv,token}} \cdot B \cdot S_i,
+\]
+and a decode latency estimate
+\[
+t_{\text{decode,ms}}(S_i) \approx
+1000 \cdot \frac{B_{\text{decode}}(S_i)}{\mathrm{BW}_{\text{mem}}}.
+\]
+
+\section{Parallelism and Communication}
+
+\subsection{Total GPUs and Layout}
+
+\[
+N_{\text{gpus}} = \mathrm{TP} \cdot \mathrm{EP} \cdot \mathrm{PP} \cdot \mathrm{DP}.
+\]
+
+Experts and layers per GPU:
+\[
+E_{\text{per-gpu}} = \frac{E}{\max(\mathrm{EP},1)},
+\quad
+L_{\text{per-gpu}} = \frac{L}{\max(\mathrm{PP},1)}.
+\]
+
+\subsection{Communication Volumes per Step}
+
+Let $B_{\text{micro}}$ be sequences per data-parallel replica per step.
+
+\paragraph{All-to-All (EP)}
+Per MoE layer:
+\[
+C_{\text{all2all,layer}} =
+2 B_{\text{micro}} S d_{\text{model}} b_{\text{train}}
+\frac{\mathrm{EP}-1}{\mathrm{EP}}.
+\]
+All layers:
+\[
+C_{\text{all2all}} = L \cdot C_{\text{all2all,layer}}.
+\]
+
+\paragraph{AllReduce (TP)}
+Per layer:
+\[
+C_{\text{allred,TP,layer}} =
+4 B_{\text{micro}} S d_{\text{model}} b_{\text{train}}
+\frac{\mathrm{TP}-1}{\mathrm{TP}}.
+\]
+All layers:
+\[
+C_{\text{allred,TP}} = L \cdot C_{\text{allred,TP,layer}}.
+\]
+
+\paragraph{P2P (PP)}
+\[
+C_{\text{p2p,PP}} =
+B_{\text{micro}} S d_{\text{model}} b_{\text{train}} \cdot \max(\mathrm{PP}-1,0).
+\]
+
+\paragraph{AllReduce (DP)}
+\[
+C_{\text{allred,DP}} =
+2 P_{\text{total}} b_{\text{train}}
+\frac{\mathrm{DP}-1}{\mathrm{DP}}.
+\]
+
+\paragraph{Total}
+\[
+C_{\text{total}} =
+C_{\text{all2all}} + C_{\text{allred,TP}} +
+C_{\text{p2p,PP}} + C_{\text{allred,DP}}.
+\]
+
+\section{Routing and Efficiency}
+
+\subsection{Active/Total Parameter Ratio}
+
+Simple ratio used as an MoE utilisation proxy:
+\[
+r_{\text{active}} = \frac{K}{E}.
+\]
+
+\subsection{Gating Overhead}
+
+Using the FLOPs breakdown:
+\[
+\text{Overhead}_{\text{gate}} =
+\frac{F_{\text{gate}}}
+{F_{\text{attn}} + F_{\text{ffn,moe}} + F_{\text{ffn,shared}} + F_{\text{gate}}}.
+\]
+
+\subsection{Expert Capacity and Drop Rate}
+
+Tokens per expert (expected), for global batch tokens $B_{\text{global}}$:
+\[
+\lambda = \frac{B_{\text{global}} \cdot K}{E}.
+\]
+Capacity factor $C_{\text{cap}}$ (e.g.\ $1.25$) gives
+\[
+C = C_{\text{cap}} \cdot \lambda.
+\]
+
+Assuming a Poisson approximation for tokens per expert,
+with $X \sim \mathrm{Poisson}(\lambda)$, the drop rate is
+the tail probability
+\[
+p_{\text{drop}} \approx \Pr[X > C].
+\]
+
+For large $\lambda$ we use a normal approximation:
+\[
+p_{\text{drop}} \approx
+1 - \Phi\!\left(\frac{C - \lambda}{\sqrt{\lambda}}\right)
+= 1 - \Phi\!\left((C_{\text{cap}} - 1)\sqrt{\lambda}\right),
+\]
+where $\Phi$ is the standard normal CDF.
+
+The UI implementation uses a rational approximation for the
+normal tail to compute $p_{\text{drop}}$.
+
+\subsection{MoE vs Dense FLOPs}
+
+MoE FLOPs per token:
+\[
+F_{\text{MoE,token}} = F_{\text{attn}} + F_{\text{ffn,moe}} + F_{\text{ffn,shared}} + F_{\text{gate}}.
+\]
+
+Dense (same total params):
+\[
+F_{\text{dense,total,token}} = F_{\text{attn}} + F_{\text{ffn,dense}} + F_{\text{ffn,shared}}.
+\]
+
+Dense (same active params) is scaled to match $P_{\text{active}}$ and
+denoted $F_{\text{dense,active,token}}$ in the UI.
+
+\section{Validation Metrics}
+
+For each metric with paper value $x_{\text{paper}}$ and
+tool estimate $x_{\text{ours}}$, the relative deviation is
+\[
+\delta = \frac{x_{\text{ours}} - x_{\text{paper}}}{x_{\text{paper}}}.
+\]
+
+Status thresholds:
+\[
+\text{PASS} \iff |\delta| \le 0.05,
+\quad
+\text{WARN} \iff 0.05 < |\delta| \le 0.15,
+\quad
+\text{FAIL} \iff |\delta| > 0.15.
+\]
+
+Currently applied to total parameters and active parameters, and
+intended to be extended to FLOPs, total training FLOPs, training memory,
+and KV cache per token as additional metrics are wired into the UI.
+
+\end{document}
+

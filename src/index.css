@@ -1,0 +1,67 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+body {
+  @apply bg-background text-white antialiased;
+}
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+.kpi-grid {
+  @apply grid gap-4;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+}
+
+.kpi-card {
+  @apply bg-card/80 border border-borderSoft/60 rounded-xl px-4 py-3 shadow-soft backdrop-blur;
+}
+
+.kpi-label {
+  @apply text-xs uppercase tracking-wide text-textMuted mb-1;
+}
+
+.kpi-value {
+  @apply text-xl font-semibold;
+}
+
+.kpi-subvalue {
+  @apply text-xs text-textMuted mt-1;
+}
+
+.section-card {
+  @apply bg-surface/80 border border-borderSoft/60 rounded-2xl p-4 shadow-soft backdrop-blur;
+}
+
+.tab-button {
+  @apply px-3 py-1.5 text-xs font-medium rounded-full border border-transparent text-textMuted hover:text-white hover:border-accent/60 transition-colors cursor-pointer;
+}
+
+.tab-button-active {
+  @apply bg-accent/15 text-accent border-accent;
+}
+
+.sidebar-label {
+  @apply text-xs font-medium text-textMuted mb-1;
+}
+
+.sidebar-input {
+  @apply w-full rounded-lg bg-card/80 border border-borderSoft/60 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent;
+}
+
+.sidebar-select {
+  @apply sidebar-input;
+}
+
+.sidebar-section {
+  @apply mb-4 space-y-1.5;
+}
+
+.sidebar-group-title {
+  @apply text-[11px] font-semibold tracking-wide uppercase text-textMuted/80 mb-1.5;
+}
+

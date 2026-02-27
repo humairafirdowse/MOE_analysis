@@ -1,0 +1,56 @@
+# Node / TypeScript
+node_modules/
+dist/
+build/
+.cache/
+.next/
+*.tsbuildinfo
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.mypy_cache/
+.pytest_cache/
+.ipynb_checkpoints/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+.env*/
+# (keep your requirements/lock files tracked)
+
+# Environment / secrets
+.env
+*.env
+
+# Logs and temp
+logs/
+*.log
+tmp/
+temp/
+*.tmp
+
+# IDE / editor / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Cursor / tooling
+.cursor/
+
+# Project-specific large artifacts (adjust as needed)
+data/raw/
+data/interim/
+outputs/
+models/
+checkpoints/
+node_modules
