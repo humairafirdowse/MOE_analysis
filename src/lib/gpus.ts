@@ -29,6 +29,15 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     memBandwidthGBs: 3350,
     costPerHourUSD: 8.5
   },
+  "H800-80G": {
+    id: "H800-80G",
+    name: "NVIDIA H800 80GB (China export variant)",
+    fp16Tflops: 756,
+    fp32Tflops: 51,
+    hbmGB: 80,
+    memBandwidthGBs: 2000,
+    costPerHourUSD: 2.0
+  },
   "H200-141G": {
     id: "H200-141G",
     name: "NVIDIA H200 141GB",

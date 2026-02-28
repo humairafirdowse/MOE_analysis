@@ -1,11 +1,21 @@
 import React, { useMemo } from "react";
 import { formatBigNumber, useConfigStore } from "../state/useConfigStore";
+import { getGpuSpec } from "../lib/gpus";
+import {
+  computeTrainingComputeMetrics,
+  computeTrainingMemoryMetrics,
+  computeInferenceMetrics
+} from "../lib/metrics";
 
 interface ValidationRow {
   metric: string;
   unit: string;
   ourValue: number | null;
   paperValue: number | null;
+  /** Optional: format our value differently for display (e.g. "2.79M") */
+  formatOur?: (v: number) => string;
+  /** Optional: format paper value differently */
+  formatPaper?: (v: number) => string;
 }
 
 function classifyDelta(delta: number | null): { status: "pass" | "warn" | "fail" | "na"; label: string } {
@@ -18,14 +28,50 @@ function classifyDelta(delta: number | null): { status: "pass" | "warn" | "fail"
   return { status: "fail", label: "❌ FAIL" };
 }
 
+function formatGpuHours(v: number): string {
+  if (v >= 1e6) return (v / 1e6).toFixed(2) + "M";
+  if (v >= 1e3) return (v / 1e3).toFixed(1) + "K";
+  return v.toFixed(0);
+}
+
+function formatKB(v: number): string {
+  return v.toFixed(1) + " KB";
+}
+
+function formatGB(v: number): string {
+  return v.toFixed(2) + " GB";
+}
+
+function formatTB(v: number): string {
+  return v.toFixed(1) + " TB";
+}
+
 export const TabValidation: React.FC = () => {
-  const { overview, paperReference, preset } = useConfigStore();
+  const { overview, paperReference, preset, model, moe, training, inference } = useConfigStore();
+  const gpu = getGpuSpec(inference.gpuType);
+
+  const trainingCompute = useMemo(
+    () => computeTrainingComputeMetrics(model, moe, training, gpu),
+    [model, moe, training, gpu]
+  );
+  const trainingMemory = useMemo(
+    () => computeTrainingMemoryMetrics(model, moe, overview, training),
+    [model, moe, overview, training]
+  );
+  const inferenceMetrics = useMemo(
+    () => computeInferenceMetrics(model, moe, overview, inference, gpu),
+    [model, moe, overview, inference, gpu]
+  );
 
   const rows: ValidationRow[] = useMemo(() => {
     const totalParamsB = overview.totalParams / 1e9;
     const activeParamsB = overview.activeParams / 1e9;
+    const kvCachePerTokenKB = inferenceMetrics.kvBytesPerToken / 1024;
+    const weightsGB = inferenceMetrics.weightsBytes / 1e9;
+    const peakTrainingGB = trainingMemory.peakBytes / 1e9;
+    const peakTrainingTB = trainingMemory.peakBytes / 1e12;
 
-    return [
+    const result: ValidationRow[] = [
       {
         metric: "Total Parameters",
         unit: "B",
@@ -37,10 +83,64 @@ export const TabValidation: React.FC = () => {
         unit: "B",
         ourValue: activeParamsB,
         paperValue: paperReference?.activeParamsB ?? null
+      },
+      {
+        metric: "GPU Hours (training)",
+        unit: "GPU·h",
+        ourValue: trainingCompute.gpuHoursApprox,
+        paperValue: paperReference?.gpuHoursReported ?? null,
+        formatOur: formatGpuHours,
+        formatPaper: formatGpuHours
+      },
+      {
+        metric: "KV Cache per token",
+        unit: "KB",
+        ourValue: kvCachePerTokenKB,
+        paperValue: paperReference?.kvCachePerTokenKB ?? null,
+        formatOur: formatKB,
+        formatPaper: formatKB
+      },
+      {
+        metric: "Inference weights",
+        unit: "GB",
+        ourValue: weightsGB,
+        paperValue: paperReference?.inferenceWeightsGB ?? null,
+        formatOur: formatGB,
+        formatPaper: formatGB
       }
-      // Training FLOPs and others can be added once we derive them in later phases.
     ];
-  }, [overview, paperReference]);
+
+    if (paperReference?.trainingMemoryTB != null) {
+      result.push({
+        metric: "Training memory (peak)",
+        unit: "TB",
+        ourValue: peakTrainingTB,
+        paperValue: paperReference.trainingMemoryTB,
+        formatOur: formatTB,
+        formatPaper: formatTB
+      });
+    } else if (paperReference?.trainingMemoryGB != null) {
+      result.push({
+        metric: "Training memory (peak)",
+        unit: "GB",
+        ourValue: peakTrainingGB,
+        paperValue: paperReference.trainingMemoryGB,
+        formatOur: formatGB,
+        formatPaper: formatGB
+      });
+    } else {
+      result.push({
+        metric: "Training memory (peak)",
+        unit: "GB",
+        ourValue: peakTrainingGB,
+        paperValue: paperReference?.trainingMemoryGB ?? null,
+        formatOur: formatGB,
+        formatPaper: formatGB
+      });
+    }
+
+    return result;
+  }, [overview, paperReference, trainingCompute, trainingMemory, inferenceMetrics]);
 
   const deltas = rows.map((row) => {
     if (row.ourValue == null || row.paperValue == null || row.paperValue === 0) {
@@ -65,6 +165,15 @@ export const TabValidation: React.FC = () => {
       ? "✅ All checked metrics within 5% of paper."
       : "No paper reference values available for this preset yet.";
 
+  const formatOurDisplay = (row: ValidationRow) => {
+    if (row.ourValue == null) return "N/A";
+    return row.formatOur ? row.formatOur(row.ourValue) : `${row.ourValue.toFixed(2)} ${row.unit}`;
+  };
+  const formatPaperDisplay = (row: ValidationRow) => {
+    if (row.paperValue == null) return "N/A";
+    return row.formatPaper ? row.formatPaper(row.paperValue) : `${row.paperValue.toFixed(2)} ${row.unit}`;
+  };
+
   return (
     <div className="flex flex-col gap-4">
       <div className="section-card">
@@ -74,7 +183,7 @@ export const TabValidation: React.FC = () => {
               Validation
             </div>
             <div className="text-[13px] text-textMuted mt-0.5">
-              Compare our theoretical calculations to reported values from the paper.
+              Compare our theoretical calculations to reported values from papers and official sources.
             </div>
           </div>
           <div className="text-right text-[11px] text-textMuted">
@@ -121,7 +230,7 @@ export const TabValidation: React.FC = () => {
                 <th className="py-1.5 pr-3 font-medium text-textMuted">Metric</th>
                 <th className="py-1.5 pr-3 font-medium text-textMuted">Our Calculation</th>
                 <th className="py-1.5 pr-3 font-medium text-textMuted">
-                  Paper&apos;s Value
+                  Paper / Reported
                 </th>
                 <th className="py-1.5 pr-3 font-medium text-textMuted">Delta (%)</th>
                 <th className="py-1.5 pr-3 font-medium text-textMuted">Status</th>
@@ -141,14 +250,10 @@ export const TabValidation: React.FC = () => {
                   >
                     <td className="py-1.5 pr-3">{row.metric}</td>
                     <td className="py-1.5 pr-3 text-textMuted">
-                      {row.ourValue == null
-                        ? "N/A"
-                        : `${row.ourValue.toFixed(2)} ${row.unit}`}
+                      {formatOurDisplay(row)}
                     </td>
                     <td className="py-1.5 pr-3 text-textMuted">
-                      {row.paperValue == null
-                        ? "N/A"
-                        : `${row.paperValue.toFixed(2)} ${row.unit}`}
+                      {formatPaperDisplay(row)}
                     </td>
                     <td className="py-1.5 pr-3">{deltaPct}</td>
                     <td className="py-1.5 pr-3">
@@ -181,12 +286,20 @@ export const TabValidation: React.FC = () => {
               tied vs untied); this can introduce a small offset.
             </li>
             <li>
-              Exact FFN structure (SwiGLU vs ReLU) slightly changes both parameter counts and
-              FLOP estimates.
+              &quot;Active params&quot; definitions vary: some include all layers, others only
+              MoE experts; MLA (DeepSeek) uses low-rank attention in the active path.
             </li>
             <li>
-              Later phases will add per-token FLOPs and memory validation once those tabs are
-              implemented.
+              Hybrid architectures (e.g. Snowflake Arctic) may require formula
+              extensions we have not yet implemented.
+            </li>
+            <li>
+              GPU hours: our estimate uses ~35% MFU; papers report actual cluster usage.
+              Inference weights: papers often cite bf16/fp16; our value depends on selected precision.
+            </li>
+            <li>
+              KV cache: DeepSeek-V2 paper reports 93.3% reduction vs dense; our MLA formula
+              matches (d_c + d_R_h) × layers. Snowflake Arctic training memory is total model state.
             </li>
           </ul>
         </div>
@@ -194,4 +307,3 @@ export const TabValidation: React.FC = () => {
     </div>
   );
 };
-

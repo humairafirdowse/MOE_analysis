@@ -13,7 +13,6 @@ const PRESET_LABELS: Record<PresetId, string> = {
   "deepseek-v3": "DeepSeek-V3",
   "mixtral-8x7b": "Mixtral 8x7B",
   "mixtral-8x22b": "Mixtral 8x22B",
-  "switch-transformer": "Switch Transformer",
   "snowflake-arctic": "Snowflake Arctic",
   custom: "Custom"
 };
@@ -28,8 +27,10 @@ const gpuOptions: { id: GpuType; label: string }[] = [
 ];
 
 export const Sidebar: React.FC = () => {
-  const { model, moe, training, inference, preset } = useConfigStore();
-  const { setModel, setMoe, setTraining, setInference, setPreset } = useConfigStore();
+  const { draftModel, draftMoe, draftTraining, draftInference, preset } =
+    useConfigStore();
+  const { setModel, setMoe, setTraining, setInference, setPreset, run } =
+    useConfigStore();
 
   const handleNumberChange =
     <T extends object>(setter: (partial: Partial<T>) => void, key: keyof T) =>
@@ -67,6 +68,13 @@ export const Sidebar: React.FC = () => {
             </option>
           ))}
         </select>
+        <button
+          type="button"
+          onClick={run}
+          className="mt-2 w-full py-2 px-3 rounded-md bg-accent hover:bg-accent/90 text-accent-foreground text-sm font-medium transition-colors"
+        >
+          Run
+        </button>
       </div>
 
       {/* Model Architecture */}
@@ -74,48 +82,154 @@ export const Sidebar: React.FC = () => {
         <div className="sidebar-group-title">Model Architecture</div>
         <LabeledInput
           label="Total parameters (B)"
-          value={model.totalParamsB}
-          onChange={handleNumberChange<typeof model>(setModel, "totalParamsB")}
+          value={draftModel.totalParamsB}
+          onChange={handleNumberChange<typeof draftModel>(setModel, "totalParamsB")}
         />
         <div className="grid grid-cols-2 gap-2">
           <LabeledInput
             label="Hidden dim (d_model)"
-            value={model.dModel}
-            onChange={handleNumberChange<typeof model>(setModel, "dModel")}
+            value={draftModel.dModel}
+            onChange={handleNumberChange<typeof draftModel>(setModel, "dModel")}
           />
           <LabeledInput
             label="Layers (L)"
-            value={model.layers}
-            onChange={handleNumberChange<typeof model>(setModel, "layers")}
+            value={draftModel.layers}
+            onChange={handleNumberChange<typeof draftModel>(setModel, "layers")}
           />
+          <LabeledInput
+            label="MoE layers (L_moe)"
+            value={draftModel.layersMoe ?? draftModel.layers}
+            onChange={(e) => {
+              const v = e.target.value;
+              const n = v === "" ? undefined : Number(v);
+              if (n !== undefined && Number.isNaN(n)) return;
+              setModel({ layersMoe: n });
+            }}
+          />
+          <LabeledInput
+            label="First K dense layers"
+            value={draftModel.firstKDenseReplace ?? 0}
+            onChange={(e) => {
+              const v = e.target.value;
+              const n = v === "" ? 0 : Number(v);
+              if (Number.isNaN(n)) return;
+              setModel({ firstKDenseReplace: n > 0 ? n : undefined });
+            }}
+          />
+          <LabeledInput
+            label="Dense d_ff"
+            value={draftModel.denseIntermediateSize ?? draftMoe.dFf}
+            onChange={(e) => {
+              const v = e.target.value;
+              const n = v === "" ? undefined : Number(v);
+              if (n !== undefined && Number.isNaN(n)) return;
+              setModel({ denseIntermediateSize: n });
+            }}
+          />
+        </div>
+        <div className="mt-1.5 space-y-1.5">
+          <label className="flex items-center gap-2 text-[11px] text-textMuted cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="h-3 w-3 rounded border-borderSoft bg-card"
+              checked={draftModel.useMLA ?? false}
+              onChange={(e) => setModel({ useMLA: e.target.checked })}
+            />
+            <span>MLA (Multi-head Latent Attention) — DeepSeek-V2/V3</span>
+          </label>
+          {draftModel.useMLA && (
+            <div className="grid grid-cols-2 gap-2 pl-5 border-l-2 border-borderSoft/50">
+              <LabeledInput
+                label="Q LoRA rank"
+                value={draftModel.mlaQLoraRank ?? 0}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const n = v === "" ? undefined : Number(v);
+                  if (n !== undefined && Number.isNaN(n)) return;
+                  setModel({ mlaQLoraRank: n });
+                }}
+              />
+              <LabeledInput
+                label="KV LoRA rank"
+                value={draftModel.mlaKvLoraRank ?? 0}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const n = v === "" ? undefined : Number(v);
+                  if (n !== undefined && Number.isNaN(n)) return;
+                  setModel({ mlaKvLoraRank: n });
+                }}
+              />
+              <LabeledInput
+                label="QK RoPE head dim"
+                value={draftModel.mlaQkRopeHeadDim ?? 0}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const n = v === "" ? undefined : Number(v);
+                  if (n !== undefined && Number.isNaN(n)) return;
+                  setModel({ mlaQkRopeHeadDim: n });
+                }}
+              />
+              <LabeledInput
+                label="QK Nope head dim"
+                value={draftModel.mlaQkNopeHeadDim ?? 0}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const n = v === "" ? undefined : Number(v);
+                  if (n !== undefined && Number.isNaN(n)) return;
+                  setModel({ mlaQkNopeHeadDim: n });
+                }}
+              />
+              <LabeledInput
+                label="V head dim"
+                value={draftModel.mlaVHeadDim ?? 0}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  const n = v === "" ? undefined : Number(v);
+                  if (n !== undefined && Number.isNaN(n)) return;
+                  setModel({ mlaVHeadDim: n });
+                }}
+              />
+            </div>
+          )}
+          <label className="flex items-center gap-2 text-[11px] text-textMuted cursor-pointer select-none">
+            <input
+              type="checkbox"
+              className="h-3 w-3 rounded border-borderSoft bg-card"
+              checked={draftModel.tieWordEmbeddings ?? false}
+              onChange={(e) =>
+                setModel({ tieWordEmbeddings: e.target.checked })
+              }
+            />
+            <span>Tied embeddings & output head</span>
+          </label>
         </div>
         <div className="grid grid-cols-3 gap-2">
           <LabeledInput
             label="Heads"
-            value={model.nHeads}
-            onChange={handleNumberChange<typeof model>(setModel, "nHeads")}
+            value={draftModel.nHeads}
+            onChange={handleNumberChange<typeof draftModel>(setModel, "nHeads")}
           />
           <LabeledInput
             label="KV heads"
-            value={model.nKvHeads}
-            onChange={handleNumberChange<typeof model>(setModel, "nKvHeads")}
+            value={draftModel.nKvHeads}
+            onChange={handleNumberChange<typeof draftModel>(setModel, "nKvHeads")}
           />
           <LabeledInput
             label="Head dim"
-            value={model.dHead}
-            onChange={handleNumberChange<typeof model>(setModel, "dHead")}
+            value={draftModel.dHead}
+            onChange={handleNumberChange<typeof draftModel>(setModel, "dHead")}
           />
         </div>
         <div className="grid grid-cols-2 gap-2">
           <LabeledInput
             label="Vocab size (V)"
-            value={model.vocabSize}
-            onChange={handleNumberChange<typeof model>(setModel, "vocabSize")}
+            value={draftModel.vocabSize}
+            onChange={handleNumberChange<typeof draftModel>(setModel, "vocabSize")}
           />
           <LabeledInput
             label="Max seq len (S)"
-            value={model.maxSeqLen}
-            onChange={handleNumberChange<typeof model>(setModel, "maxSeqLen")}
+            value={draftModel.maxSeqLen}
+            onChange={handleNumberChange<typeof draftModel>(setModel, "maxSeqLen")}
           />
         </div>
       </div>
@@ -126,26 +240,26 @@ export const Sidebar: React.FC = () => {
         <div className="grid grid-cols-2 gap-2">
           <LabeledInput
             label="Experts (E)"
-            value={moe.numExperts}
-            onChange={handleNumberChange<typeof moe>(setMoe, "numExperts")}
+            value={draftMoe.numExperts}
+            onChange={handleNumberChange<typeof draftMoe>(setMoe, "numExperts")}
           />
           <LabeledInput
             label="Top-K (K)"
-            value={moe.topK}
-            onChange={handleNumberChange<typeof moe>(setMoe, "topK")}
+            value={draftMoe.topK}
+            onChange={handleNumberChange<typeof draftMoe>(setMoe, "topK")}
           />
         </div>
         <div className="grid grid-cols-2 gap-2">
           <LabeledInput
             label="Shared experts"
-            value={moe.numSharedExperts}
-            onChange={handleNumberChange<typeof moe>(setMoe, "numSharedExperts")}
+            value={draftMoe.numSharedExperts}
+            onChange={handleNumberChange<typeof draftMoe>(setMoe, "numSharedExperts")}
           />
           <select
             className="sidebar-select mt-auto"
-            value={moe.expertGranularity}
+            value={draftMoe.expertGranularity}
             onChange={(e) =>
-              setMoe({ expertGranularity: e.target.value as typeof moe.expertGranularity })
+              setMoe({ expertGranularity: e.target.value as typeof draftMoe.expertGranularity })
             }
           >
             <option value="fine">Fine-grained</option>
@@ -155,13 +269,13 @@ export const Sidebar: React.FC = () => {
         <div className="grid grid-cols-2 gap-2">
           <LabeledInput
             label="Expert d_ff"
-            value={moe.dFf}
-            onChange={handleNumberChange<typeof moe>(setMoe, "dFf")}
+            value={draftMoe.dFf}
+            onChange={handleNumberChange<typeof draftMoe>(setMoe, "dFf")}
           />
           <LabeledInput
             label="Shared d_ff"
-            value={moe.dSharedFf}
-            onChange={handleNumberChange<typeof moe>(setMoe, "dSharedFf")}
+            value={draftMoe.dSharedFf}
+            onChange={handleNumberChange<typeof draftMoe>(setMoe, "dSharedFf")}
           />
         </div>
       </div>
@@ -171,18 +285,18 @@ export const Sidebar: React.FC = () => {
         <div className="sidebar-group-title">Training Configuration</div>
         <LabeledInput
           label="Global batch (tokens)"
-          value={training.globalBatchTokens}
-          onChange={handleNumberChange<typeof training>(setTraining, "globalBatchTokens")}
+          value={draftTraining.globalBatchTokens}
+          onChange={handleNumberChange<typeof draftTraining>(setTraining, "globalBatchTokens")}
         />
         <LabeledInput
           label="Total training tokens (T)"
-          value={training.totalTrainingTokens}
-          onChange={handleNumberChange<typeof training>(setTraining, "totalTrainingTokens")}
+          value={draftTraining.totalTrainingTokens}
+          onChange={handleNumberChange<typeof draftTraining>(setTraining, "totalTrainingTokens")}
         />
         <div className="grid grid-cols-2 gap-2">
           <LabeledSelect<PrecisionTraining>
             label="Precision"
-            value={training.precision}
+            value={draftTraining.precision}
             options={[
               { id: "fp32", label: "fp32" },
               { id: "bf16", label: "bf16" },
@@ -192,7 +306,7 @@ export const Sidebar: React.FC = () => {
           />
           <LabeledSelect<TrainingOptimizer>
             label="Optimizer"
-            value={training.optimizer}
+            value={draftTraining.optimizer}
             options={[
               { id: "adam", label: "Adam" },
               { id: "adafactor", label: "AdaFactor" }
@@ -203,7 +317,7 @@ export const Sidebar: React.FC = () => {
         <div className="grid grid-cols-2 gap-2 mt-1.5">
           <LabeledSelect<"fp32" | "bf16">
             label="Grad precision"
-            value={training.gradPrecision}
+            value={draftTraining.gradPrecision}
             options={[
               { id: "fp32", label: "fp32" },
               { id: "bf16", label: "bf16" }
@@ -212,7 +326,7 @@ export const Sidebar: React.FC = () => {
           />
           <LabeledSelect<"none" | "sqrt" | "selective">
             label="Checkpointing"
-            value={training.activationCheckpointing}
+            value={draftTraining.activationCheckpointing}
             options={[
               { id: "none", label: "None" },
               { id: "sqrt", label: "Uniform (√L)" },
@@ -227,7 +341,7 @@ export const Sidebar: React.FC = () => {
           <input
             type="checkbox"
             className="h-3 w-3 rounded border-borderSoft bg-card"
-            checked={training.useFlashAttention}
+            checked={draftTraining.useFlashAttention}
             onChange={(e) =>
               setTraining({ useFlashAttention: e.target.checked })
             }
@@ -237,23 +351,23 @@ export const Sidebar: React.FC = () => {
         <div className="grid grid-cols-4 gap-1.5">
           <LabeledInput
             label="TP"
-            value={training.tp}
-            onChange={handleNumberChange<typeof training>(setTraining, "tp")}
+            value={draftTraining.tp}
+            onChange={handleNumberChange<typeof draftTraining>(setTraining, "tp")}
           />
           <LabeledInput
             label="EP"
-            value={training.ep}
-            onChange={handleNumberChange<typeof training>(setTraining, "ep")}
+            value={draftTraining.ep}
+            onChange={handleNumberChange<typeof draftTraining>(setTraining, "ep")}
           />
           <LabeledInput
             label="PP"
-            value={training.pp}
-            onChange={handleNumberChange<typeof training>(setTraining, "pp")}
+            value={draftTraining.pp}
+            onChange={handleNumberChange<typeof draftTraining>(setTraining, "pp")}
           />
           <LabeledInput
             label="DP"
-            value={training.dp}
-            onChange={handleNumberChange<typeof training>(setTraining, "dp")}
+            value={draftTraining.dp}
+            onChange={handleNumberChange<typeof draftTraining>(setTraining, "dp")}
           />
         </div>
       </div>
@@ -264,24 +378,24 @@ export const Sidebar: React.FC = () => {
         <div className="grid grid-cols-3 gap-2">
           <LabeledInput
             label="Batch size"
-            value={inference.batchSize}
-            onChange={handleNumberChange<typeof inference>(setInference, "batchSize")}
+            value={draftInference.batchSize}
+            onChange={handleNumberChange<typeof draftInference>(setInference, "batchSize")}
           />
           <LabeledInput
             label="Input len"
-            value={inference.inputSeqLen}
-            onChange={handleNumberChange<typeof inference>(setInference, "inputSeqLen")}
+            value={draftInference.inputSeqLen}
+            onChange={handleNumberChange<typeof draftInference>(setInference, "inputSeqLen")}
           />
           <LabeledInput
             label="Output len"
-            value={inference.outputSeqLen}
-            onChange={handleNumberChange<typeof inference>(setInference, "outputSeqLen")}
+            value={draftInference.outputSeqLen}
+            onChange={handleNumberChange<typeof draftInference>(setInference, "outputSeqLen")}
           />
         </div>
         <div className="grid grid-cols-2 gap-2 mt-1.5">
           <LabeledSelect<PrecisionInference>
             label="Precision"
-            value={inference.precision}
+            value={draftInference.precision}
             options={[
               { id: "fp16", label: "fp16" },
               { id: "bf16", label: "bf16" },
@@ -293,7 +407,7 @@ export const Sidebar: React.FC = () => {
           />
           <LabeledSelect<GpuType>
             label="GPU type"
-            value={inference.gpuType}
+            value={draftInference.gpuType}
             options={gpuOptions}
             onChange={(value) => setInference({ gpuType: value })}
           />

@@ -38,9 +38,43 @@ export function attentionFlopsPerToken(
   const dModel = model.dModel;
   const L = model.layers;
   const H = model.nHeads;
+  const S = seqLen;
+
+  const hasMLAParams =
+    model.useMLA &&
+    (model.mlaQLoraRank ?? 0) > 0 &&
+    (model.mlaKvLoraRank ?? 0) > 0 &&
+    (model.mlaQkRopeHeadDim ?? 0) > 0 &&
+    (model.mlaQkNopeHeadDim ?? 0) > 0 &&
+    (model.mlaVHeadDim ?? 0) > 0;
+
+  if (hasMLAParams) {
+    const qLora = model.mlaQLoraRank!;
+    const kvLora = model.mlaKvLoraRank!;
+    const qkRope = model.mlaQkRopeHeadDim!;
+    const qkNope = model.mlaQkNopeHeadDim!;
+    const vHead = model.mlaVHeadDim!;
+    const qHeadDim = qkNope + qkRope;
+
+    // MLA: q_a, q_b, kv_a, kv_b, o_proj (2× for matmul FLOPs).
+    const FqA = 2 * dModel * qLora;
+    const FqB = 2 * qLora * (H * qHeadDim);
+    const FkvA = 2 * dModel * (kvLora + qkRope);
+    const FkvB = 2 * kvLora * (H * (qkNope + vHead));
+    const Fo = 2 * (H * vHead) * dModel;
+    const Fproj = FqA + FqB + FkvA + FkvB + Fo;
+
+    // Attention scores (Q @ K^T) and context (attn @ V).
+    const Fscore = 2 * S * H * qHeadDim;
+    const Fcontext = 2 * S * H * vHead;
+    const FattnCompute = Fscore + Fcontext;
+
+    const perLayer = Fproj + FattnCompute;
+    return L * perLayer;
+  }
+
   const Hkv = model.nKvHeads;
   const dh = model.dHead;
-  const S = seqLen;
 
   // Projection FLOPs (Q, K, V, O) with GQA.
   const Fq = 2 * dModel * (H * dh);
@@ -67,17 +101,17 @@ export function moeFlopsComponentsPerToken(
   gating: number;
 } {
   const d = model.dModel;
-  const L = model.layers;
+  const L_moe = model.layersMoe ?? model.layers;
 
   // Per active expert (SwiGLU): 6 × d_model × d_ff
   const perExpert = 6 * d * moe.dFf;
   const perShared = 6 * d * moe.dSharedFf;
 
-  const moeFfn = L * moe.topK * perExpert;
-  const sharedFfn = L * moe.numSharedExperts * perShared;
+  const moeFfn = L_moe * moe.topK * perExpert;
+  const sharedFfn = L_moe * moe.numSharedExperts * perShared;
 
   // Gating: 2 × d_model × E per MoE layer
-  const gating = L * 2 * d * moe.numExperts;
+  const gating = L_moe * 2 * d * moe.numExperts;
 
   return { moeFfn, sharedFfn, gating };
 }
@@ -91,12 +125,17 @@ export function forwardFlopsPerToken(
   moeFfn: number;
   sharedFfn: number;
   gating: number;
+  denseFfn: number;
   total: number;
 } {
   const attention = attentionFlopsPerToken(model, seqLen);
   const { moeFfn, sharedFfn, gating } = moeFlopsComponentsPerToken(model, moe);
-  const total = attention + moeFfn + sharedFfn + gating;
-  return { attention, moeFfn, sharedFfn, gating, total };
+  const numDense = model.firstKDenseReplace ?? 0;
+  const denseDff = model.denseIntermediateSize ?? moe.dFf;
+  const denseFfn =
+    numDense > 0 ? numDense * 6 * model.dModel * denseDff : 0;
+  const total = attention + moeFfn + sharedFfn + gating + denseFfn;
+  return { attention, moeFfn, sharedFfn, gating, denseFfn, total };
 }
 
 export function denseEquivalentForwardFlopsPerToken(
@@ -105,16 +144,20 @@ export function denseEquivalentForwardFlopsPerToken(
   seqLen: number
 ): number {
   const d = model.dModel;
-  const L = model.layers;
+  const L_moe = model.layersMoe ?? model.layers;
+  const numDense = model.firstKDenseReplace ?? 0;
+  const denseDff = model.denseIntermediateSize ?? moe.dFf;
 
   const attention = attentionFlopsPerToken(model, seqLen);
 
-  // Dense equivalent: all experts fire (K_dense = E).
+  // Dense equivalent: all experts fire (K_dense = E) in MoE layers.
   const perExpertDense = 6 * d * moe.dFf;
-  const denseFfn = L * moe.numExperts * perExpertDense;
-  const shared = L * moe.numSharedExperts * (6 * d * moe.dSharedFf);
+  const moeDenseFfn = L_moe * moe.numExperts * perExpertDense;
+  const shared = L_moe * moe.numSharedExperts * (6 * d * moe.dSharedFf);
+  const denseLayersFfn =
+    numDense > 0 ? numDense * 6 * d * denseDff : 0;
 
-  return attention + denseFfn + shared;
+  return attention + moeDenseFfn + shared + denseLayersFfn;
 }
 
 // ---- Training compute metrics ----
@@ -335,9 +378,15 @@ export function computeInferenceMetrics(
 
   const weightsBytes = overview.totalParams * bytesWeight;
 
-  // KV cache memory.
-  const kvBytesPerToken =
-    2 * L * model.nKvHeads * model.dHead * bytesWeight;
+  // KV cache memory. MLA caches (d_c + d_R_h) per layer per paper; standard uses n_kv_heads * d_head.
+  const useMLACache =
+    model.useMLA &&
+    (model.mlaKvLoraRank ?? 0) > 0 &&
+    (model.mlaQkRopeHeadDim ?? 0) > 0;
+  const kvDimPerLayer = useMLACache
+    ? model.mlaKvLoraRank! + model.mlaQkRopeHeadDim!
+    : model.nKvHeads * model.dHead;
+  const kvBytesPerToken = 2 * L * kvDimPerLayer * bytesWeight;
   const kvTotalBytes =
     kvBytesPerToken * inference.batchSize * Math.max(S_total, 1);
 
@@ -495,7 +544,7 @@ export function computeRoutingEfficiencyMetrics(
     moe.numExperts > 0 ? moe.topK / moe.numExperts : 0;
 
   const S = model.maxSeqLen;
-  const { attention, moeFfn, sharedFfn, gating, total } =
+  const { attention, moeFfn, sharedFfn, gating, denseFfn, total } =
     forwardFlopsPerToken(model, moe, S);
 
   const gatingOverheadPct = total > 0 ? gating / total : 0;
@@ -517,7 +566,7 @@ export function computeRoutingEfficiencyMetrics(
     theoreticalDropRate = Math.min(Math.max(tail, 0), 1);
   }
 
-  const flopsMoePerToken = attention + moeFfn + sharedFfn + gating;
+  const flopsMoePerToken = attention + moeFfn + sharedFfn + gating + denseFfn;
   const flopsDenseTotalPerToken = denseEquivalentForwardFlopsPerToken(
     model,
     moe,

@@ -35,6 +35,11 @@ $K$ & Top-$K$ active experts per token \\
 $N_{\text{sh}}$ & Number of shared experts \\
 $H$ & \# attention heads \\
 $H_{\text{kv}}$ & \# KV heads (GQA) \\
+$d_c$ & MLA KV compression dim (kv\_lora\_rank) \\
+$d'_c$ & MLA query compression dim (q\_lora\_rank) \\
+$d^R_h$ & MLA decoupled RoPE head dim \\
+$d^{\text{nope}}_h$, $d^{\text{rope}}_h$ & MLA Q/K non-positional and RoPE head dims \\
+$d_v$ & MLA value head dim \\
 $b_{\text{train}}$ & Bytes per parameter (training) \\
 $b_{\text{inf}}$ & Bytes per parameter (inference) \\
 $T$ & Total training tokens \\
@@ -72,6 +77,21 @@ All layers:
 P_{\text{attn}} = L \cdot P_{\text{attn,layer}}.
 \]
 
+\paragraph{Per-Layer Attention with MLA (DeepSeek-V2/V3)}
+Multi-head Latent Attention uses low-rank projections. Let $d_c$ (kv\_lora\_rank),
+$d'_c$ (q\_lora\_rank), $d^R_h$ (qk\_rope\_head\_dim), $d^{\text{nope}}_h$ (qk\_nope\_head\_dim),
+$d_v$ (v\_head\_dim). Per layer:
+\begin{align*}
+P_{Q_a} &= d_{\text{model}} \cdot d'_c, \quad
+P_{Q_b} = d'_c \cdot (H \cdot (d^{\text{nope}}_h + d^{\text{rope}}_h)), \\
+P_{\text{KV},a} &= d_{\text{model}} \cdot (d_c + d^R_h), \quad
+P_{\text{KV},b} = d_c \cdot (H \cdot (d^{\text{nope}}_h + d_v)), \\
+P_O &= (H \cdot d_v) \cdot d_{\text{model}}.
+\end{align*}
+\[
+P_{\text{attn,layer}} = P_{Q_a} + P_{Q_b} + P_{\text{KV},a} + P_{\text{KV},b} + P_O.
+\]
+
 \paragraph{Per-Expert FFN (SwiGLU)}
 For both routed and shared experts, assuming SwiGLU:
 \[
@@ -86,6 +106,18 @@ With $L_{\text{moe}}$ MoE layers (UI uses $L_{\text{moe}} = L$):
 P_{\text{experts}} &= L_{\text{moe}} \cdot E \cdot P_{\text{ffn,expert}}, \\
 P_{\text{shared}}  &= L_{\text{moe}} \cdot N_{\text{sh}} \cdot P_{\text{ffn,shared}}.
 \end{align*}
+
+\paragraph{Dense FFN Layers (e.g.\ DeepSeek-V3)}
+First $K_{\text{dense}}$ layers may use dense FFN instead of MoE, with intermediate dim $d_{\text{ff,dense}}$:
+\[
+P_{\text{dense}} = K_{\text{dense}} \cdot 3 d_{\text{model}} d_{\text{ff,dense}}.
+\]
+
+\paragraph{Residual MLP (e.g.\ Snowflake Arctic)}
+Each MoE layer may add a parallel dense MLP with intermediate $d_{\text{ff,res}}$:
+\[
+P_{\text{res,MLP}} = L_{\text{moe}} \cdot 3 d_{\text{model}} d_{\text{ff,res}}.
+\]
 
 \paragraph{Gating / Router Parameters}
 Each MoE layer uses a linear router $d_{\text{model}} \to E$:
@@ -115,24 +147,29 @@ P_{\text{out}} = V \cdot d_{\text{model}}.
 \[
 P_{\text{total}} =
 P_{\text{embed}} + P_{\text{attn}} + P_{\text{experts}} + P_{\text{shared}}
-+ P_{\text{gate}} + P_{\text{norm}} + P_{\text{out}}.
++ P_{\text{gate}} + P_{\text{norm}} + P_{\text{out}}
++ P_{\text{dense}} + P_{\text{res,MLP}},
 \]
+where $P_{\text{dense}}$ and $P_{\text{res,MLP}}$ are zero when not used.
 
 \paragraph{Active Parameters per Token}
 Only $K$ experts fire per MoE layer per token; shared experts,
-gating and norms are always active:
+gating, norms, dense layers and residual MLP are always active:
 \begin{align*}
 P_{\text{experts,active}} &= L_{\text{moe}} \cdot K \cdot P_{\text{ffn,expert}}, \\
 P_{\text{shared,active}}  &= P_{\text{shared}}, \\
 P_{\text{gate,active}}    &= P_{\text{gate}}, \\
-P_{\text{norm,active}}    &= P_{\text{norm}}.
+P_{\text{norm,active}}    &= P_{\text{norm}}, \\
+P_{\text{dense,active}}   &= P_{\text{dense}}, \quad
+P_{\text{res,MLP,active}} = P_{\text{res,MLP}}.
 \end{align*}
 Then
 \[
 P_{\text{active}} =
 P_{\text{embed}} + P_{\text{attn}} +
 P_{\text{experts,active}} + P_{\text{shared,active}}
-+ P_{\text{gate,active}} + P_{\text{norm,active}} + P_{\text{out}}.
++ P_{\text{gate,active}} + P_{\text{norm,active}} + P_{\text{out}}
++ P_{\text{dense,active}} + P_{\text{res,MLP,active}}.
 \]
 
 The equivalent dense baseline used in the UI has
@@ -181,6 +218,28 @@ this reduces to the classical
 \[
 F_{\text{attn,layer}} \approx
 8 d_{\text{model}}^2 + 4 S d_{\text{model}}.
+\]
+
+\subsection{Attention FLOPs with MLA}
+For MLA (DeepSeek-V2/V3), let $d_{\text{q,head}} = d^{\text{nope}}_h + d^{\text{rope}}_h$.
+Projection FLOPs per layer:
+\begin{align*}
+F_{Q_a} &= 2 d_{\text{model}} d'_c, \quad
+F_{Q_b} = 2 d'_c (H d_{\text{q,head}}), \\
+F_{\text{KV},a} &= 2 d_{\text{model}} (d_c + d^R_h), \quad
+F_{\text{KV},b} = 2 d_c (H (d^{\text{nope}}_h + d_v)), \\
+F_O &= 2 (H d_v) d_{\text{model}}.
+\end{align*}
+\[
+F_{\text{proj}} = F_{Q_a} + F_{Q_b} + F_{\text{KV},a} + F_{\text{KV},b} + F_O.
+\]
+Attention scores and context:
+\[
+F_{\text{score}} = 2 S H d_{\text{q,head}}, \quad
+F_{\text{context}} = 2 S H d_v.
+\]
+\[
+F_{\text{attn,layer}} = F_{\text{proj}} + F_{\text{score}} + F_{\text{context}}.
 \]
 
 \subsection{MoE FFN and Gating FLOPs per Token}
@@ -397,9 +456,18 @@ M_{\text{weights}} = P_{\text{total}} \cdot b_{\text{inf}}.
 \]
 
 KV cache per token:
-\[
-M_{\text{kv,token}} = 2 L H_{\text{kv}} d_{\text{head}} \, b_{\text{inf}}.
-\]
+\begin{itemize}
+  \item \textbf{Standard (GQA/MHA):}
+  \[
+  M_{\text{kv,token}} = 2 L H_{\text{kv}} d_{\text{head}} \, b_{\text{inf}}.
+  \]
+  \item \textbf{MLA (DeepSeek-V2/V3):} Only the compressed latent $c^{\text{KV}}_t$
+  and decoupled RoPE key $k^R_t$ are cached per layer:
+  \[
+  M_{\text{kv,token}} = 2 L (d_c + d^R_h) \, b_{\text{inf}}.
+  \]
+  Per DeepSeek-V2 paper, this yields $\approx 93\%$ reduction vs MHA.
+\end{itemize}
 
 For batch size $B$ and effective sequence length $S_{\text{tot}}$:
 \[
@@ -558,6 +626,8 @@ denoted $F_{\text{dense,active,token}}$ in the UI.
 
 \section{Validation Metrics}
 
+\subsection{Deviation and Status}
+
 For each metric with paper value $x_{\text{paper}}$ and
 tool estimate $x_{\text{ours}}$, the relative deviation is
 \[
@@ -573,9 +643,51 @@ Status thresholds:
 \text{FAIL} \iff |\delta| > 0.15.
 \]
 
-Currently applied to total parameters and active parameters, and
-intended to be extended to FLOPs, total training FLOPs, training memory,
-and KV cache per token as additional metrics are wired into the UI.
+\subsection{Validated Metrics}
+
+The tool compares the following metrics against paper-reported values:
+
+\begin{tabular}{lll}
+\toprule
+Metric & Our formula / source & Paper field \\
+\midrule
+Total parameters ($P_{\text{total}}$) & Parameter counting & \texttt{totalParamsB} \\
+Active parameters ($P_{\text{active}}$) & Parameter counting & \texttt{activeParamsB} \\
+GPU hours (training) & $t_{\text{train}} \cdot N_{\text{gpus}} / 3600$ & \texttt{gpuHoursReported} \\
+KV cache per token & $2 L (d_c + d^R_h) b_{\text{inf}}$ (MLA) or $2 L H_{\text{kv}} d_{\text{head}} b_{\text{inf}}$ & \texttt{kvCachePerTokenKB} \\
+Inference weights & $P_{\text{total}} \cdot b_{\text{inf}}$ & \texttt{inferenceWeightsGB} \\
+Training memory (peak) & $M_{\text{peak}}$ & \texttt{trainingMemoryGB} / \texttt{trainingMemoryTB} \\
+\bottomrule
+\end{tabular}
+
+\subsection{Paper Reference Values}
+
+\begin{table}[h]
+\centering
+\caption{Paper-reported values used for validation}
+\small
+\begin{tabular}{lrrrrrr}
+\toprule
+Model & $P_{\text{total}}$ (B) & $P_{\text{active}}$ (B) & GPU hours & KV (KB/tok) & Weights (GB) & Train mem \\
+\midrule
+DeepSeek-V2 & 236 & 21 & --- & 67.5 & --- & --- \\
+DeepSeek-V3 & 671 & 37 & 2.788M & --- & --- & --- \\
+Mixtral 8x7B & 46.7 & 12.9 & --- & --- & 94 & --- \\
+Mixtral 8x22B & 141 & 39 & --- & --- & 283 & --- \\
+Snowflake Arctic & 480 & 17 & 504K & --- & --- & 7.5 TB \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\subsection{Sources}
+
+\begin{itemize}
+  \item \textbf{DeepSeek-V2} (arxiv:2405.04434): KV cache $(d_c + d^R_h) \times L$ elements,
+  $d_c = 512$, $d^R_h = 64$, $L = 60$; 93.3\% reduction vs MHA.
+  \item \textbf{DeepSeek-V3} (arxiv:2412.19437): Table 1: 2.788M H800 GPU hours for full training.
+  \item \textbf{Mixtral} (Mistral docs): 94 GB (8x7B), 283 GB (8x22B) for bf16 inference.
+  \item \textbf{Snowflake Arctic} (Snowflake blog): 3000 GPU weeks ($\approx$ 504K GPU-hours), 7.5 TB model state.
+\end{itemize}
 
 \end{document}
 

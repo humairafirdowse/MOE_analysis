@@ -15,6 +15,30 @@ export interface ModelArchitectureConfig {
   totalParamsB: number;
   dModel: number;
   layers: number;
+  /** Number of MoE layers (L_moe). When undefined, assumed equal to L (all layers MoE). */
+  layersMoe?: number;
+  /** First K layers are dense FFN (not MoE). DeepSeek-V3 uses 3. */
+  firstKDenseReplace?: number;
+  /** Dense FFN intermediate size for non-MoE layers. DeepSeek-V3 uses 18432. */
+  denseIntermediateSize?: number;
+  /** Parallel residual MLP per MoE layer (Arctic). When true, each MoE layer has dense MLP + MoE. */
+  useResidualMLP?: boolean;
+  /** Residual MLP intermediate size (when useResidualMLP). Arctic uses 4864. */
+  residualMLPIntermediateSize?: number;
+  /** Multi-head Latent Attention (MLA) - reduces KV cache. DeepSeek-V2/V3. */
+  useMLA?: boolean;
+  /** MLA: Q low-rank projection dim. */
+  mlaQLoraRank?: number;
+  /** MLA: KV low-rank projection dim. */
+  mlaKvLoraRank?: number;
+  /** MLA: head dim for Q/K RoPE (positional). */
+  mlaQkRopeHeadDim?: number;
+  /** MLA: head dim for Q/K non-positional. */
+  mlaQkNopeHeadDim?: number;
+  /** MLA: head dim for V. */
+  mlaVHeadDim?: number;
+  /** Tied embedding and output head — don't double-count. */
+  tieWordEmbeddings?: boolean;
   nHeads: number;
   nKvHeads: number;
   dHead: number;
@@ -66,7 +90,6 @@ export type PresetId =
   | "deepseek-v3"
   | "mixtral-8x7b"
   | "mixtral-8x22b"
-  | "switch-transformer"
   | "snowflake-arctic"
   | "custom";
 
@@ -74,11 +97,20 @@ export interface PaperReferenceMetrics {
   name: string;
   totalParamsB?: number;
   activeParamsB?: number;
+  /** Per-token training FLOPs in trillions (TF). */
   trainingFlopsPerTokenTF?: number;
+  /** Total training FLOPs in petaflops (PF). */
   totalTrainingFlopsPF?: number;
+  /** Peak training memory in GB. */
   trainingMemoryGB?: number;
+  /** KV cache bytes per token in KB. */
   kvCachePerTokenKB?: number;
+  /** Reported GPU hours for full training. */
   gpuHoursReported?: number;
+  /** Inference model weights in GB (e.g. bf16). */
+  inferenceWeightsGB?: number;
+  /** Training memory in TB (for very large models). */
+  trainingMemoryTB?: number;
 }
 
 export interface DerivedOverviewMetrics {
@@ -92,17 +124,23 @@ export interface DerivedOverviewMetrics {
 }
 
 export interface ConfigState {
-  // Raw configs
+  // Active config (used for metrics) — updated only on Run or preset change
   model: ModelArchitectureConfig;
   moe: MoeConfig;
   training: TrainingConfig;
   inference: InferenceConfig;
   preset: PresetId;
 
+  // Draft config (edited by knobs) — updates on every knob change
+  draftModel: ModelArchitectureConfig;
+  draftMoe: MoeConfig;
+  draftTraining: TrainingConfig;
+  draftInference: InferenceConfig;
+
   // Paper reference for validation tab
   paperReference?: PaperReferenceMetrics;
 
-  // Computed overview metrics
+  // Computed overview metrics (from active config)
   overview: DerivedOverviewMetrics;
 
   // Actions
@@ -111,6 +149,7 @@ export interface ConfigState {
   setTraining: (partial: Partial<TrainingConfig>) => void;
   setInference: (partial: Partial<InferenceConfig>) => void;
   setPreset: (preset: PresetId) => void;
+  run: () => void;
   recomputeOverview: () => void;
 }
 
@@ -131,6 +170,29 @@ function computePerLayerAttentionParams(
   return qProj + kProj + vProj + oProj;
 }
 
+/** MLA attention params per layer from actual structure (DeepSeek). */
+function computePerLayerMLAAttentionParams(
+  dModel: number,
+  nHeads: number,
+  qLoraRank: number,
+  kvLoraRank: number,
+  qkRopeHeadDim: number,
+  qkNopeHeadDim: number,
+  vHeadDim: number
+) {
+  const qHeadDim = qkNopeHeadDim + qkRopeHeadDim;
+  // q_a: d_model -> q_lora_rank; q_b: q_lora_rank -> n_heads * q_head_dim
+  const qA = dModel * qLoraRank;
+  const qB = qLoraRank * (nHeads * qHeadDim);
+  // kv_a: d_model -> kv_lora_rank + qk_rope_head_dim (MQA for K rotation)
+  const kvA = dModel * (kvLoraRank + qkRopeHeadDim);
+  // kv_b: kv_lora_rank -> n_heads * (qk_nope + v_head_dim)
+  const kvB = kvLoraRank * (nHeads * (qkNopeHeadDim + vHeadDim));
+  // o: n_heads * v_head_dim -> d_model
+  const oProj = (nHeads * vHeadDim) * dModel;
+  return qA + qB + kvA + kvB + oProj;
+}
+
 function computePerExpertFfnParams(dModel: number, dFf: number) {
   // Assume SwiGLU: gate + up + down = 3 * d_model * d_ff
   return 3 * dModel * dFf;
@@ -142,25 +204,52 @@ function computeOverview(
 ): DerivedOverviewMetrics {
   const { dModel, layers, nHeads, nKvHeads, dHead, vocabSize } = model;
   const { numExperts, numSharedExperts, topK, dFf, dSharedFf } = moe;
+  const numDenseLayers = model.firstKDenseReplace ?? 0;
+  const moeLayers = model.layersMoe ?? Math.max(0, layers - numDenseLayers);
+  const denseDff = model.denseIntermediateSize ?? dFf;
 
   const embeddingParams = vocabSize * dModel;
-  const perLayerAttention = computePerLayerAttentionParams(
-    dModel,
-    dHead,
-    nHeads,
-    nKvHeads
-  );
+  const hasMLAParams =
+    model.useMLA &&
+    (model.mlaQLoraRank ?? 0) > 0 &&
+    (model.mlaKvLoraRank ?? 0) > 0 &&
+    (model.mlaQkRopeHeadDim ?? 0) > 0 &&
+    (model.mlaQkNopeHeadDim ?? 0) > 0 &&
+    (model.mlaVHeadDim ?? 0) > 0;
+  const perLayerAttention = hasMLAParams
+    ? computePerLayerMLAAttentionParams(
+        dModel,
+        nHeads,
+        model.mlaQLoraRank!,
+        model.mlaKvLoraRank!,
+        model.mlaQkRopeHeadDim!,
+        model.mlaQkNopeHeadDim!,
+        model.mlaVHeadDim!
+      )
+    : computePerLayerAttentionParams(dModel, dHead, nHeads, nKvHeads);
   const attentionParams = perLayerAttention * layers;
 
   const perExpert = computePerExpertFfnParams(dModel, dFf);
   const perShared = computePerExpertFfnParams(dModel, dSharedFf);
-
-  // Assume every layer is a MoE layer for now (L_moe = L).
-  const moeLayers = layers;
   const expertParams = moeLayers * numExperts * perExpert;
   const sharedExpertParams = moeLayers * numSharedExperts * perShared;
 
-  const outputHeadParams = vocabSize * dModel; // separate from embedding even if tied
+  // Dense FFN layers (non-MoE, e.g. first K layers in DeepSeek-V3).
+  const denseParams =
+    numDenseLayers > 0
+      ? numDenseLayers * computePerExpertFfnParams(dModel, denseDff)
+      : 0;
+
+  // Parallel residual MLP per MoE layer (Arctic: dense + MoE hybrid).
+  const residualMLPDff =
+    model.residualMLPIntermediateSize ?? model.denseIntermediateSize ?? dFf;
+  const residualMLPParams =
+    model.useResidualMLP === true
+      ? moeLayers * computePerExpertFfnParams(dModel, residualMLPDff)
+      : 0;
+
+  const outputHeadParams =
+    model.tieWordEmbeddings === true ? 0 : vocabSize * dModel;
 
   // RMSNorm / LayerNorm parameters: assume two norms per layer (pre-attn, pre-ffn).
   const normParamsPerLayer = 2 * dModel;
@@ -175,6 +264,8 @@ function computeOverview(
     attentionParams +
     expertParams +
     sharedExpertParams +
+    denseParams +
+    residualMLPParams +
     outputHeadParams +
     normParams +
     gatingParams;
@@ -183,12 +274,18 @@ function computeOverview(
   const activeSharedParams = sharedExpertParams; // shared experts always active
   const activeNormParams = normParams; // norms always active
   const activeGatingParams = gatingParams; // gating always active
+  // Dense layers are always active.
+  const activeDenseParams = denseParams;
+  // MLA: full low-rank structure is used in forward; standard: all attention active.
+  const activeAttentionParams = attentionParams;
 
   const activeParams =
     embeddingParams +
-    attentionParams +
+    activeAttentionParams +
     activeExpertParams +
     activeSharedParams +
+    activeDenseParams +
+    residualMLPParams +
     outputHeadParams +
     activeNormParams +
     activeGatingParams;
@@ -208,8 +305,43 @@ function computeOverview(
 const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: PaperReferenceMetrics }> =
   {
     "deepseek-v2": {
-      config: {},
-      ref: undefined
+      config: {
+        model: {
+          totalParamsB: 236,
+          dModel: 5120,
+          layers: 60,
+          layersMoe: 59,
+          firstKDenseReplace: 1,
+          denseIntermediateSize: 12288,
+          useMLA: true,
+          mlaQLoraRank: 1536,
+          mlaKvLoraRank: 512,
+          mlaQkRopeHeadDim: 64,
+          mlaQkNopeHeadDim: 128,
+          mlaVHeadDim: 128,
+          tieWordEmbeddings: false,
+          nHeads: 128,
+          nKvHeads: 128,
+          dHead: 40,
+          vocabSize: 102400,
+          maxSeqLen: 16384
+        },
+        moe: {
+          numExperts: 160,
+          topK: 6,
+          numSharedExperts: 2,
+          dFf: 1536,
+          dSharedFf: 1536,
+          expertGranularity: "fine"
+        },
+      },
+      ref: {
+        name: "DeepSeek-V2",
+        totalParamsB: 236,
+        activeParamsB: 21,
+        kvCachePerTokenKB: 67.5,
+        gpuHoursReported: undefined
+      }
     },
     "deepseek-v3": {
       config: {
@@ -217,6 +349,17 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           totalParamsB: 671,
           dModel: 7168,
           layers: 61,
+          layersMoe: 58,
+          firstKDenseReplace: 3,
+          denseIntermediateSize: 18432,
+          useResidualMLP: false,
+          useMLA: true,
+          mlaQLoraRank: 1536,
+          mlaKvLoraRank: 512,
+          mlaQkRopeHeadDim: 64,
+          mlaQkNopeHeadDim: 128,
+          mlaVHeadDim: 128,
+          tieWordEmbeddings: false,
           nHeads: 128,
           nKvHeads: 128,
           dHead: 128,
@@ -265,6 +408,11 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           totalParamsB: 46.7,
           dModel: 4096,
           layers: 32,
+          layersMoe: 32,
+          firstKDenseReplace: 0,
+          denseIntermediateSize: undefined,
+          useMLA: false,
+          tieWordEmbeddings: false,
           nHeads: 32,
           nKvHeads: 8,
           dHead: 128,
@@ -303,20 +451,79 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
       ref: {
         name: "Mixtral 8x7B",
         totalParamsB: 46.7,
-        activeParamsB: 12.9
+        activeParamsB: 12.9,
+        inferenceWeightsGB: 94
       }
     },
     "mixtral-8x22b": {
-      config: {},
-      ref: undefined
-    },
-    "switch-transformer": {
-      config: {},
-      ref: undefined
+      config: {
+        model: {
+          totalParamsB: 141,
+          dModel: 6144,
+          layers: 56,
+          layersMoe: 56,
+          firstKDenseReplace: 0,
+          denseIntermediateSize: undefined,
+          useResidualMLP: false,
+          useMLA: false,
+          tieWordEmbeddings: false,
+          nHeads: 48,
+          nKvHeads: 8,
+          dHead: 128,
+          vocabSize: 32000,
+          maxSeqLen: 65536
+        },
+        moe: {
+          numExperts: 8,
+          topK: 2,
+          numSharedExperts: 0,
+          dFf: 16384,
+          dSharedFf: 16384,
+          expertGranularity: "coarse"
+        },
+      },
+      ref: {
+        name: "Mixtral 8x22B",
+        totalParamsB: 141,
+        activeParamsB: 39,
+        inferenceWeightsGB: 283
+      }
     },
     "snowflake-arctic": {
-      config: {},
-      ref: undefined
+      config: {
+        model: {
+          totalParamsB: 480,
+          dModel: 7168,
+          layers: 35,
+          layersMoe: 35,
+          firstKDenseReplace: 0,
+          denseIntermediateSize: undefined,
+          useResidualMLP: true,
+          residualMLPIntermediateSize: 4864,
+          useMLA: false,
+          tieWordEmbeddings: false,
+          nHeads: 56,
+          nKvHeads: 56,
+          dHead: 128,
+          vocabSize: 32000,
+          maxSeqLen: 4096
+        },
+        moe: {
+          numExperts: 128,
+          topK: 2,
+          numSharedExperts: 0,
+          dFf: 4864,
+          dSharedFf: 4864,
+          expertGranularity: "fine"
+        },
+      },
+      ref: {
+        name: "Snowflake Arctic",
+        totalParamsB: 480,
+        activeParamsB: 17,
+        gpuHoursReported: 504000,
+        trainingMemoryTB: 7.5
+      }
     },
     custom: {
       config: {},
@@ -324,84 +531,107 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
     }
   };
 
-const DEFAULT_STATE: Omit<ConfigState, "setModel" | "setMoe" | "setTraining" | "setInference" | "setPreset" | "recomputeOverview"> =
-  {
-    model: {
-      totalParamsB: 671,
-      dModel: 7168,
-      layers: 61,
-      nHeads: 128,
-      nKvHeads: 128,
-      dHead: 128,
-      vocabSize: 129280,
-      maxSeqLen: 4096
-    },
-    moe: {
-      numExperts: 256,
-      topK: 8,
-      numSharedExperts: 1,
-      dFf: 2048,
-      dSharedFf: 2048,
-      expertGranularity: "fine"
-    },
-    training: {
-      globalBatchTokens: 4096 * 8192,
-      totalTrainingTokens: 14.8e12,
-      precision: "fp8",
-      optimizer: "adam",
-      gradPrecision: "fp32",
-      activationCheckpointing: "selective",
-      useFlashAttention: true,
-      tp: 8,
-      ep: 32,
-      pp: 8,
-      dp: 16
-    },
-    inference: {
-      batchSize: 8,
-      inputSeqLen: 4096,
-      outputSeqLen: 256,
-      precision: "fp16",
-      gpuType: "H100-80G"
-    },
-    preset: "deepseek-v3",
-    paperReference: PAPER_PRESETS["deepseek-v3"].ref,
-    overview: {
-      totalParams: 0,
-      embeddingParams: 0,
-      attentionParams: 0,
-      expertParams: 0,
-      sharedExpertParams: 0,
-      outputHeadParams: 0,
-      activeParams: 0
-    }
-  };
+const DEFAULT_MODEL: ModelArchitectureConfig = {
+  totalParamsB: 671,
+  dModel: 7168,
+  layers: 61,
+  layersMoe: 58,
+  firstKDenseReplace: 3,
+  denseIntermediateSize: 18432,
+  useMLA: true,
+  mlaQLoraRank: 1536,
+  mlaKvLoraRank: 512,
+  mlaQkRopeHeadDim: 64,
+  mlaQkNopeHeadDim: 128,
+  mlaVHeadDim: 128,
+  nHeads: 128,
+  nKvHeads: 128,
+  dHead: 128,
+  vocabSize: 129280,
+  maxSeqLen: 4096
+};
+
+const DEFAULT_MOE: MoeConfig = {
+  numExperts: 256,
+  topK: 8,
+  numSharedExperts: 1,
+  dFf: 2048,
+  dSharedFf: 2048,
+  expertGranularity: "fine"
+};
+
+const DEFAULT_TRAINING: TrainingConfig = {
+  globalBatchTokens: 4096 * 8192,
+  totalTrainingTokens: 14.8e12,
+  precision: "fp8",
+  optimizer: "adam",
+  gradPrecision: "fp32",
+  activationCheckpointing: "selective",
+  useFlashAttention: true,
+  tp: 8,
+  ep: 32,
+  pp: 8,
+  dp: 16
+};
+
+const DEFAULT_INFERENCE: InferenceConfig = {
+  batchSize: 8,
+  inputSeqLen: 4096,
+  outputSeqLen: 256,
+  precision: "fp16",
+  gpuType: "H100-80G"
+};
+
+const DEFAULT_STATE: Omit<
+  ConfigState,
+  "setModel" | "setMoe" | "setTraining" | "setInference" | "setPreset" | "run" | "recomputeOverview"
+> = {
+  model: { ...DEFAULT_MODEL },
+  moe: { ...DEFAULT_MOE },
+  training: { ...DEFAULT_TRAINING },
+  inference: { ...DEFAULT_INFERENCE },
+  draftModel: { ...DEFAULT_MODEL },
+  draftMoe: { ...DEFAULT_MOE },
+  draftTraining: { ...DEFAULT_TRAINING },
+  draftInference: { ...DEFAULT_INFERENCE },
+  preset: "deepseek-v3",
+  paperReference: PAPER_PRESETS["deepseek-v3"].ref,
+  overview: {
+    totalParams: 0,
+    embeddingParams: 0,
+    attentionParams: 0,
+    expertParams: 0,
+    sharedExpertParams: 0,
+    outputHeadParams: 0,
+    activeParams: 0
+  }
+};
 
 export const useConfigStore = create<ConfigState>((set, get) => ({
   ...DEFAULT_STATE,
   overview: computeOverview(DEFAULT_STATE.model, DEFAULT_STATE.moe),
 
   setModel: (partial) => {
-    set((state) => {
-      const model = { ...state.model, ...partial };
-      return { model, overview: computeOverview(model, state.moe), preset: "custom" };
-    });
+    set((state) => ({
+      draftModel: { ...state.draftModel, ...partial },
+      preset: "custom"
+    }));
   },
   setMoe: (partial) => {
-    set((state) => {
-      const moe = { ...state.moe, ...partial };
-      return { moe, overview: computeOverview(state.model, moe), preset: "custom" };
-    });
+    set((state) => ({
+      draftMoe: { ...state.draftMoe, ...partial },
+      preset: "custom"
+    }));
   },
   setTraining: (partial) => {
     set((state) => ({
-      training: { ...state.training, ...partial },
+      draftTraining: { ...state.draftTraining, ...partial },
       preset: "custom"
     }));
   },
   setInference: (partial) => {
     set((state) => ({
-      inference: { ...state.inference, ...partial },
+      draftInference: { ...state.draftInference, ...partial },
       preset: "custom"
     }));
   },
@@ -422,8 +652,28 @@ export const useConfigStore = create<ConfigState>((set, get) => ({
         moe,
         training,
         inference,
+        draftModel: { ...model },
+        draftMoe: { ...moe },
+        draftTraining: { ...training },
+        draftInference: { ...inference },
         preset: presetId,
         paperReference: preset.ref,
+        overview
+      };
+    });
+  },
+  run: () => {
+    set((state) => {
+      const model = { ...state.draftModel };
+      const moe = { ...state.draftMoe };
+      const training = { ...state.draftTraining };
+      const inference = { ...state.draftInference };
+      const overview = computeOverview(model, moe);
+      return {
+        model,
+        moe,
+        training,
+        inference,
         overview
       };
     });
