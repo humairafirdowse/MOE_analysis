@@ -54,3 +54,4 @@ outputs/
 models/
 checkpoints/
 node_modules
+.vercel

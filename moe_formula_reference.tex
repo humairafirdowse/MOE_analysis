@@ -25,14 +25,16 @@ $d_{\text{head}}$ & Per-head dimension \\
 $d_{\text{ff}}$ & Expert FFN hidden dim \\
 $d_{\text{ff,sh}}$ & Shared FFN hidden dim \\
 $L$ & Number of transformer layers \\
-$L_{\text{moe}}$ & Number of MoE layers (UI assumes $L_{\text{moe}}=L$) \\
+$L_{\text{moe}}$ & Number of MoE layers (UI: $L - K_{\text{dense}}$ when dense layers exist, else $L$) \\
 $V$ & Vocabulary size \\
 $S$ & Sequence length (tokens) \\
 $B$ & Batch size (sequences) \\
 $B_{\text{global}}$ & Global batch in tokens \\
+$B_{\text{micro}}$ & Sequences per DP replica per step ($B_{\text{global}}/(S \cdot \mathrm{DP})$) \\
 $E$ & Number of routed experts per MoE layer \\
 $K$ & Top-$K$ active experts per token \\
 $N_{\text{sh}}$ & Number of shared experts \\
+$K_{\text{dense}}$ & First $K_{\text{dense}}$ layers are dense FFN (not MoE) \\
 $H$ & \# attention heads \\
 $H_{\text{kv}}$ & \# KV heads (GQA) \\
 $d_c$ & MLA KV compression dim (kv\_lora\_rank) \\
@@ -101,17 +103,18 @@ P_{\text{ffn,shared}} = 3 \cdot d_{\text{model}} \cdot d_{\text{ff,sh}}.
 \]
 
 \paragraph{Routed and Shared Experts}
-With $L_{\text{moe}}$ MoE layers (UI uses $L_{\text{moe}} = L$):
+With $L_{\text{moe}}$ MoE layers (UI: $L_{\text{moe}} = L - K_{\text{dense}}$ when $K_{\text{dense}} > 0$, else $L_{\text{moe}} = L$):
 \begin{align*}
 P_{\text{experts}} &= L_{\text{moe}} \cdot E \cdot P_{\text{ffn,expert}}, \\
 P_{\text{shared}}  &= L_{\text{moe}} \cdot N_{\text{sh}} \cdot P_{\text{ffn,shared}}.
 \end{align*}
 
 \paragraph{Dense FFN Layers (e.g.\ DeepSeek-V3)}
-First $K_{\text{dense}}$ layers may use dense FFN instead of MoE, with intermediate dim $d_{\text{ff,dense}}$:
+First $K_{\text{dense}}$ layers use dense FFN (SwiGLU) with intermediate dim $d_{\text{ff,dense}}$:
 \[
-P_{\text{dense}} = K_{\text{dense}} \cdot 3 d_{\text{model}} d_{\text{ff,dense}}.
+P_{\text{dense}} = K_{\text{dense}} \cdot 3 \, d_{\text{model}} \, d_{\text{ff,dense}}.
 \]
+These layers are always active; $L_{\text{moe}}$ excludes them.
 
 \paragraph{Residual MLP (e.g.\ Snowflake Arctic)}
 Each MoE layer may add a parallel dense MLP with intermediate $d_{\text{ff,res}}$:
@@ -120,7 +123,7 @@ P_{\text{res,MLP}} = L_{\text{moe}} \cdot 3 d_{\text{model}} d_{\text{ff,res}}.
 \]
 
 \paragraph{Gating / Router Parameters}
-Each MoE layer uses a linear router $d_{\text{model}} \to E$:
+Each MoE layer uses a linear router $d_{\text{model}} \to E$ (only MoE layers have gating):
 \[
 P_{\text{gate,layer}} = d_{\text{model}} \cdot E,
 \quad
@@ -264,18 +267,20 @@ F_{\text{gate}} = L_{\text{moe}} \cdot F_{\text{gate,layer}}.
 
 \subsection{Total Forward and Dense-Equivalent FLOPs}
 
-Total forward FLOPs per token:
+Total forward FLOPs per token (UI includes dense FFN and residual MLP when used):
 \[
-F_{\text{fwd,MoE}} = F_{\text{attn}} + F_{\text{ffn,moe}} + F_{\text{ffn,shared}} + F_{\text{gate}}.
+F_{\text{fwd,MoE}} = F_{\text{attn}} + F_{\text{ffn,moe}} + F_{\text{ffn,shared}} + F_{\text{gate}}
++ F_{\text{ffn,dense}} + F_{\text{ffn,res,MLP}},
 \]
+where $F_{\text{ffn,dense}} = K_{\text{dense}} \cdot 6 \, d_{\text{model}} \, d_{\text{ff,dense}}$ and
+$F_{\text{ffn,res,MLP}} = L_{\text{moe}} \cdot 6 \, d_{\text{model}} \, d_{\text{ff,res}}$ when residual MLP is enabled.
 
-Dense-equivalent FFN FLOPs (all experts fire):
+Dense-equivalent forward (all experts fire in MoE layers; dense layers and residual MLP unchanged):
 \[
-F_{\text{ffn,dense}} = L_{\text{moe}} \cdot E \cdot 6 d_{\text{model}} d_{\text{ff}},
-\]
-\[
+F_{\text{ffn,dense,eq}} = L_{\text{moe}} \cdot E \cdot 6 \, d_{\text{model}} \, d_{\text{ff}},
+\quad
 F_{\text{fwd,dense}} =
-F_{\text{attn}} + F_{\text{ffn,dense}} + F_{\text{ffn,shared}}.
+F_{\text{attn}} + F_{\text{ffn,dense,eq}} + F_{\text{ffn,shared}} + F_{\text{ffn,dense}} + F_{\text{ffn,res,MLP}}.
 \]
 
 MoE vs dense compute ratio:
@@ -285,9 +290,9 @@ r_{\text{MoE/dense}} = \frac{F_{\text{fwd,MoE}}}{F_{\text{fwd,dense}}}.
 
 \subsection{Training FLOPs and GPU-Hours}
 
-Per-token training FLOPs (forward + backward + update):
+Per-token training FLOPs: backward is $2 \times$ forward (UI: \texttt{backwardFlopsPerToken = 2 * forwardFlopsPerToken}), so
 \[
-F_{\text{train,token}} \approx 3 \cdot F_{\text{fwd,MoE}}.
+F_{\text{train,token}} = F_{\text{fwd,MoE}} + 2 F_{\text{fwd,MoE}} = 3 \cdot F_{\text{fwd,MoE}}.
 \]
 
 Total for $T$ tokens:
@@ -300,20 +305,20 @@ Total GPU count:
 N_{\text{gpus}} = \mathrm{TP} \cdot \mathrm{EP} \cdot \mathrm{PP} \cdot \mathrm{DP}.
 \]
 
-Effective cluster throughput:
+Peak TFLOPS per GPU depends on training precision (UI): FP32 uses GPU FP32 peak; BF16 uses FP16 peak; FP8 uses \texttt{fp8TrainingTflops} or 2$\times$FP16. Effective per-GPU TFLOPS:
 \[
-F_{\text{eff}} = F_{\text{gpu}} \cdot U \cdot N_{\text{gpus}} \quad [\text{TFLOPs}].
+F_{\text{eff,per-gpu}} = F_{\text{gpu}}(\text{precision}) \cdot U.
 \]
 
-Time to train:
+Wall-clock time and GPU-hours:
 \[
-t_{\text{train}} = \frac{F_{\text{train,total}}}{F_{\text{eff}} \cdot 10^{12}}
+t_{\text{train}} = \frac{F_{\text{train,total}}}{F_{\text{eff,per-gpu}} \cdot N_{\text{gpus}} \cdot 10^{12}}
 \quad [\text{s}],
+\quad
+\text{GPU-hours} = \frac{t_{\text{train}} \cdot N_{\text{gpus}}}{3600}
+= \frac{F_{\text{train,total}}}{F_{\text{eff,per-gpu}} \cdot 10^{12} \cdot 3600}.
 \]
-and
-\[
-\text{GPU-hours} = \frac{t_{\text{train}} \cdot N_{\text{gpus}}}{3600}.
-\]
+Training cost (UI): $\text{cost} = \text{GPU-hours} \times \text{costPerGpuHour}$.
 
 \section{Training Memory}
 
@@ -324,46 +329,49 @@ Let $P_{\text{total}}$ be total parameters. For training precision with bytes $b
 M_{\text{params}} = P_{\text{total}} \cdot b_{\text{train}}.
 \]
 
-Optimizer states:
+Optimizer states (UI: \texttt{optimizerBytesPerParam}):
 \[
-M_{\text{opt}} \approx
+M_{\text{opt}} = P_{\text{total}} \cdot (\text{bytes per param}),
+\quad
+\text{bytes/param} =
 \begin{cases}
-12 \, P_{\text{total}}, & \text{Adam with FP32 master},\\
-8 \, P_{\text{total}}, & \text{Adam with BF16/FP8 master or AdaFactor-like}.
+8,  & \text{Adam, FP32 (m + v only)},\\
+12, & \text{Adam, mixed precision (FP32 master + m + v)},\\
+4,  & \text{AdaFactor-like}.
 \end{cases}
 \]
 
-Gradient memory (configurable):
+Gradient memory (UI: \texttt{gradPrecision}):
 \[
 M_{\text{grads}} =
 \begin{cases}
 4 \, P_{\text{total}}, & \text{FP32 gradients},\\
-2 \, P_{\text{total}}, & \text{BF16/FP16 gradients}.
+2 \, P_{\text{total}}, & \text{BF16 gradients}.
 \end{cases}
 \]
 
 \subsection{Activation Memory}
 
-Approximate batch size in sequences:
+Batch size in sequences (UI: \texttt{batchSizeSeq = globalBatchTokens / max(seqLen, 1)}):
 \[
-B_{\text{seq}} \approx \frac{B_{\text{global}}}{S}.
+B_{\text{seq}} = \frac{B_{\text{global}}}{\max(S, 1)}.
 \]
 
-Assuming storage at $b_{\text{train}}$ bytes/val:
+Storage at $b_{\text{train}}$ bytes/val:
 
-Attention activations (pre-softmax logits + post-softmax weights), if no FlashAttention:
+Attention activations (pre-softmax logits + post-softmax weights). If FlashAttention is enabled, UI sets $M_{\text{attn,act}} = 0$; otherwise:
 \[
 M_{\text{attn,act}} =
 2 \, B_{\text{seq}} \, H \, S^2 \, b_{\text{train}}.
 \]
 
-FFN activations (top-$K$ experts):
+FFN activations (top-$K$ experts, at least one):
 \[
 M_{\text{ffn,act}} =
-B_{\text{seq}} \, S \, d_{\text{ff}} \, \max(K,1) \, b_{\text{train}}.
+B_{\text{seq}} \, S \, d_{\text{ff}} \, \max(K, 1) \, b_{\text{train}}.
 \]
 
-Residual stream:
+Residual stream (two copies per layer in UI):
 \[
 M_{\text{resid}} =
 2 \, B_{\text{seq}} \, S \, d_{\text{model}} \, b_{\text{train}}.
@@ -374,26 +382,23 @@ Per layer:
 M_{\text{act,layer}} = M_{\text{attn,act}} + M_{\text{ffn,act}} + M_{\text{resid}}.
 \]
 
-If FlashAttention is enabled, we set $M_{\text{attn,act}} \approx 0$ and only
-store $M_{\text{ffn,act}}$ and $M_{\text{resid}}$.
-
 \subsection{Checkpointing Modes}
 
-With $L$ layers:
+UI uses $L$ layers and \texttt{activationCheckpointing}:
 \begin{itemize}
-  \item \textbf{No checkpointing:}
+  \item \textbf{None:} store all layers.
   \[
   M_{\text{act,total}} = L \cdot M_{\text{act,layer}}.
   \]
 
-  \item \textbf{Uniform $\sqrt{L}$ checkpointing:}
+  \item \textbf{sqrt:} uniform $\sqrt{L}$ checkpoints.
   \[
-  M_{\text{act,total}} \approx 2 \cdot \left\lceil \sqrt{L} \right\rceil \cdot M_{\text{act,layer}}.
+  M_{\text{act,total}} = 2 \cdot \lceil \sqrt{L} \rceil \cdot M_{\text{act,layer}}.
   \]
 
-  \item \textbf{Selective recomputation (attention recomputed, FFN stored):}
+  \item \textbf{Selective:} attention recomputed, FFN + residual stored per layer.
   \[
-  M_{\text{act,total}} \approx L \cdot (M_{\text{ffn,act}} + M_{\text{resid}}).
+  M_{\text{act,total}} = L \cdot (M_{\text{ffn,act}} + M_{\text{resid}}).
   \]
 \end{itemize}
 
@@ -404,7 +409,7 @@ Peak training memory:
 M_{\text{peak}} = M_{\text{params}} + M_{\text{opt}} + M_{\text{grads}} + M_{\text{act,total}}.
 \]
 
-Sharding:
+Sharding (UI: weights/optimizer/gradients over TP$\times$EP$\times$PP; activations over TP$\times$PP only):
 \begin{align*}
 M_{\text{state,per-gpu}} &=
 \frac{M_{\text{params}} + M_{\text{opt}} + M_{\text{grads}}}
@@ -418,35 +423,30 @@ M_{\text{per-gpu}} &= M_{\text{state,per-gpu}} + M_{\text{act,per-gpu}}.
 
 \subsection{FLOPs and Latency}
 
-Prefill per-token FLOPs use the forward formula with $S_{\text{in}}$:
+Prefill: per-token forward FLOPs at sequence length $S_{\text{in}}$ are $F_{\text{fwd,MoE}}(S_{\text{in}})$. Total prefill FLOPs for batch $B$:
 \[
-F_{\text{prefill,token}} = F_{\text{fwd,MoE}}(S_{\text{in}}).
+F_{\text{prefill,total}} = F_{\text{fwd,MoE}}(S_{\text{in}}) \cdot B \cdot S_{\text{in}}.
 \]
-For batch size $B$:
+UI uses effective prefill TFLOPS = $0.4 \times$ peak GPU TFLOPS (FP8/INT8 use FP8 peak when set). Compute GPUs for one request = TP $\times$ EP (PP stages sequential). Prefill latency:
 \[
-F_{\text{prefill,total}} =
-F_{\text{prefill,token}} \cdot B \cdot S_{\text{in}}.
-\]
-Prefill latency:
-\[
-t_{\text{prefill}} =
-\frac{F_{\text{prefill,total}}}{F_{\text{eff}} \cdot 10^{12}},
+t_{\text{prefill}} = \frac{F_{\text{prefill,total}}}{(\mathrm{TP} \cdot \mathrm{EP}) \cdot F_{\text{eff,inf}} \cdot 10^{12}}
+\quad [\text{s}],
 \quad
-t_{\text{prefill,ms}} = 1000 t_{\text{prefill}}.
+t_{\text{prefill,ms}} = 1000 \, t_{\text{prefill}}.
 \]
+Prefill tokens/s = $B \cdot S_{\text{in}} / t_{\text{prefill}}$.
 
-Decode FLOPs per token reuse $F_{\text{fwd,MoE}}(S_{\text{in}})$.
-Decode latency is approximated as memory-bound:
+Decode: memory-bound. Per decode step the UI reads (sharded) active weights + KV cache. Non-expert active params sharded by TP; expert active params sharded by TP$\times$EP. Bytes per GPU per step:
 \[
-B_{\text{decode}} \approx P_{\text{active}} \cdot b_{\text{inf}},
-\quad
-t_{\text{decode}} \approx \frac{B_{\text{decode}}}{\mathrm{BW}_{\text{mem}}},
-\quad
-t_{\text{decode,ms}} = 1000 t_{\text{decode}},
+B_{\text{decode,per-gpu}} = \frac{P_{\text{non-expert,active}} \cdot b_{\text{inf}}}{\mathrm{TP}}
++ \frac{P_{\text{expert,active}} \cdot b_{\text{inf}}}{\mathrm{TP} \cdot \mathrm{EP}}
++ \frac{M_{\text{kv,total}}}{\mathrm{TP}}.
 \]
+Decode latency per token (per GPU): $t_{\text{decode}} = B_{\text{decode,per-gpu}} / \mathrm{BW}_{\text{mem}}$. Each step produces $B$ tokens (batch size), so
 \[
-\text{tokens/s} \approx \frac{1}{t_{\text{decode}}}.
+\text{decode tokens/s} = \frac{B}{t_{\text{decode}}}.
 \]
+TTFT = $t_{\text{prefill}}$; inter-token latency = $t_{\text{decode}}$; total generation time = TTFT + $S_{\text{out}} \cdot t_{\text{decode}}$.
 
 \subsection{Weights and KV Cache}
 
@@ -455,18 +455,17 @@ Weights:
 M_{\text{weights}} = P_{\text{total}} \cdot b_{\text{inf}}.
 \]
 
-KV cache per token:
+KV cache per token (UI implementation):
 \begin{itemize}
-  \item \textbf{Standard (GQA/MHA):}
+  \item \textbf{Standard (GQA/MHA):} key and value each $H_{\text{kv}} d_{\text{head}}$ per layer:
   \[
-  M_{\text{kv,token}} = 2 L H_{\text{kv}} d_{\text{head}} \, b_{\text{inf}}.
+  M_{\text{kv,token}} = 2 \, L \, H_{\text{kv}} \, d_{\text{head}} \, b_{\text{inf}}.
   \]
-  \item \textbf{MLA (DeepSeek-V2/V3):} Only the compressed latent $c^{\text{KV}}_t$
-  and decoupled RoPE key $k^R_t$ are cached per layer:
+  \item \textbf{MLA (DeepSeek-V2/V3):} single compressed latent per layer, $(d_c + d^R_h)$ elements:
   \[
-  M_{\text{kv,token}} = 2 L (d_c + d^R_h) \, b_{\text{inf}}.
+  M_{\text{kv,token}} = L \, (d_c + d^R_h) \, b_{\text{inf}}.
   \]
-  Per DeepSeek-V2 paper, this yields $\approx 93\%$ reduction vs MHA.
+  (UI uses one factor of $L (d_c + d^R_h)$, not $2L$.)
 \end{itemize}
 
 For batch size $B$ and effective sequence length $S_{\text{tot}}$:
@@ -480,24 +479,14 @@ M_{\text{inf,total}} =
 M_{\text{weights}} + M_{\text{kv,total}}.
 \]
 
-Given available memory $M_{\text{avail}}$ for KV (after weights), the
-KV-limited max batch size is
+Per GPU, available bytes for KV after weights: $M_{\text{avail}} = \text{HBM}_{\text{GB}} \cdot 10^9 - M_{\text{weights,per-gpu}}$. KV-limited max batch size (UI):
 \[
-B_{\max} \approx
-\left\lfloor \frac{M_{\text{avail}}}{M_{\text{kv,token}} \cdot S_{\text{tot}}} \right\rfloor.
+B_{\max} = \left\lfloor \frac{M_{\text{avail}}}{M_{\text{kv,token}} \cdot S_{\text{tot}} / \mathrm{TP}} \right\rfloor.
 \]
 
 \subsection{KV vs Sequence-Length Curve}
 
-For sample sequence lengths $S_i$, the tool plots
-\[
-M_{\text{kv,total}}(S_i) = M_{\text{kv,token}} \cdot B \cdot S_i,
-\]
-and a decode latency estimate
-\[
-t_{\text{decode,ms}}(S_i) \approx
-1000 \cdot \frac{B_{\text{decode}}(S_i)}{\mathrm{BW}_{\text{mem}}}.
-\]
+UI sequence-length sweep: for sample lengths $S_i$, KV cache (GB) = $M_{\text{kv,token}} \cdot B \cdot S_i / 10^9$; decode latency (ms) = $1000 \cdot B_{\text{decode,per-gpu}}(S_i) / \mathrm{BW}_{\text{mem}}$ with $B_{\text{decode,per-gpu}}$ including sharded active weights and KV for that $S_i$; TTFT at $S_i$ from prefill FLOPs at $S_i$; total time = TTFT + $S_{\text{out}} \cdot t_{\text{decode}}$.
 
 \section{Parallelism and Communication}
 
@@ -507,37 +496,38 @@ t_{\text{decode,ms}}(S_i) \approx
 N_{\text{gpus}} = \mathrm{TP} \cdot \mathrm{EP} \cdot \mathrm{PP} \cdot \mathrm{DP}.
 \]
 
-Experts and layers per GPU:
+Experts and layers per GPU (UI):
 \[
-E_{\text{per-gpu}} = \frac{E}{\max(\mathrm{EP},1)},
+E_{\text{per-gpu}} = \frac{E}{\max(\mathrm{EP}, 1)},
 \quad
-L_{\text{per-gpu}} = \frac{L}{\max(\mathrm{PP},1)}.
+L_{\text{per-gpu}} = \frac{L}{\max(\mathrm{PP}, 1)}.
 \]
 
 \subsection{Communication Volumes per Step}
 
-Let $B_{\text{micro}}$ be sequences per data-parallel replica per step.
+$B_{\text{micro}}$ = sequences per DP replica per step = $B_{\text{global}} / (S \cdot \mathrm{DP})$ (UI: \texttt{microBatchSeq}).
 
 \paragraph{All-to-All (EP)}
-Per MoE layer:
+Only MoE layers incur expert-parallel traffic. Per MoE layer:
 \[
 C_{\text{all2all,layer}} =
-2 B_{\text{micro}} S d_{\text{model}} b_{\text{train}}
-\frac{\mathrm{EP}-1}{\mathrm{EP}}.
+2 \, B_{\text{micro}} \, S \, d_{\text{model}} \, b_{\text{train}}
+\,\frac{\mathrm{EP}-1}{\mathrm{EP}}.
 \]
-All layers:
+Total (UI: \texttt{allToAllBytesPerStep}):
 \[
-C_{\text{all2all}} = L \cdot C_{\text{all2all,layer}}.
+C_{\text{all2all}} = L_{\text{moe}} \cdot C_{\text{all2all,layer}}.
 \]
 
 \paragraph{AllReduce (TP)}
-Per layer:
+All $L$ layers. Per layer (UI uses factor 4 for reduce-scatter + allgather):
 \[
 C_{\text{allred,TP,layer}} =
-4 B_{\text{micro}} S d_{\text{model}} b_{\text{train}}
-\frac{\mathrm{TP}-1}{\mathrm{TP}}.
+2 \cdot 2 \, B_{\text{micro}} \, S \, d_{\text{model}} \, b_{\text{train}}
+\,\frac{\mathrm{TP}-1}{\mathrm{TP}}
+= 4 \, B_{\text{micro}} \, S \, d_{\text{model}} \, b_{\text{train}}
+\,\frac{\mathrm{TP}-1}{\mathrm{TP}}.
 \]
-All layers:
 \[
 C_{\text{allred,TP}} = L \cdot C_{\text{allred,TP,layer}}.
 \]
@@ -545,14 +535,16 @@ C_{\text{allred,TP}} = L \cdot C_{\text{allred,TP,layer}}.
 \paragraph{P2P (PP)}
 \[
 C_{\text{p2p,PP}} =
-B_{\text{micro}} S d_{\text{model}} b_{\text{train}} \cdot \max(\mathrm{PP}-1,0).
+B_{\text{micro}} \, S \, d_{\text{model}} \, b_{\text{train}}
+\cdot \max(\mathrm{PP}-1, 0).
 \]
 
 \paragraph{AllReduce (DP)}
+Gradient sync once per step:
 \[
 C_{\text{allred,DP}} =
-2 P_{\text{total}} b_{\text{train}}
-\frac{\mathrm{DP}-1}{\mathrm{DP}}.
+2 \, P_{\text{total}} \, b_{\text{train}}
+\,\frac{\mathrm{DP}-1}{\mathrm{DP}}.
 \]
 
 \paragraph{Total}
@@ -573,11 +565,10 @@ r_{\text{active}} = \frac{K}{E}.
 
 \subsection{Gating Overhead}
 
-Using the FLOPs breakdown:
+UI uses full forward total (including dense FFN and residual MLP when present):
 \[
 \text{Overhead}_{\text{gate}} =
-\frac{F_{\text{gate}}}
-{F_{\text{attn}} + F_{\text{ffn,moe}} + F_{\text{ffn,shared}} + F_{\text{gate}}}.
+\frac{F_{\text{gate}}}{F_{\text{fwd,MoE}}}.
 \]
 
 \subsection{Expert Capacity and Drop Rate}
@@ -611,18 +602,86 @@ normal tail to compute $p_{\text{drop}}$.
 
 \subsection{MoE vs Dense FLOPs}
 
-MoE FLOPs per token:
+MoE FLOPs per token (UI: \texttt{flopsMoePerToken}):
 \[
-F_{\text{MoE,token}} = F_{\text{attn}} + F_{\text{ffn,moe}} + F_{\text{ffn,shared}} + F_{\text{gate}}.
+F_{\text{MoE,token}} = F_{\text{fwd,MoE}}.
 \]
 
-Dense (same total params):
+Dense (same total params): all experts fire in MoE layers (\texttt{flopsDenseTotalPerToken}):
 \[
-F_{\text{dense,total,token}} = F_{\text{attn}} + F_{\text{ffn,dense}} + F_{\text{ffn,shared}}.
+F_{\text{dense,total,token}} = F_{\text{fwd,dense}}.
 \]
 
-Dense (same active params) is scaled to match $P_{\text{active}}$ and
-denoted $F_{\text{dense,active,token}}$ in the UI.
+Dense (same active params): UI scales dense total FLOPs by active/total parameter ratio:
+\[
+F_{\text{dense,active,token}} = F_{\text{dense,total,token}} \cdot \frac{P_{\text{active}}}{P_{\text{total}}}.
+\]
+(\texttt{flopsDenseActivePerToken}.)
+
+\section{Hardware Efficiency (UI)}
+
+\subsection{Training: MFU, HFU, Bubble, Throughput}
+
+Model FLOPs Utilization (user-set): $U = \mathrm{MFU}$.
+
+HFU includes recomputation from activation checkpointing. Recompute multiplier (UI):
+\begin{itemize}
+  \item \textbf{None:} $r = 1$.
+  \item \textbf{sqrt:} $r = 4/3$.
+  \item \textbf{Selective:} $r = 1 + F_{\text{attn}} / (3 F_{\text{fwd,MoE}})$.
+\end{itemize}
+\[
+\mathrm{HFU} = \mathrm{MFU} \cdot r.
+\]
+
+Pipeline bubble (1F1B): $\mathrm{numMicrobatches} = \lfloor B_{\text{global}} / (\mathrm{DP} \cdot S) \rfloor$,
+\[
+\text{bubble} = \frac{\mathrm{PP} - 1}{\mathrm{numMicrobatches}} \times 100\%.
+\]
+
+Effective throughput (tokens/s/GPU): $F_{\text{eff,per-gpu}} = F_{\text{gpu}} \cdot U$,
+\[
+\text{tokens/s/GPU} = \frac{F_{\text{eff,per-gpu}} \cdot 10^{12}}{3 \cdot F_{\text{fwd,MoE}}}.
+\]
+
+Compute-comm overlap: compute time per step = $\text{computeFlopsPerStep} / (F_{\text{eff,per-gpu}} \cdot 10^{12})$; comm time = $C_{\text{total}} / \mathrm{BW}_{\text{interconnect}}$; overlap \% = $\min(\text{compute}, \text{comm}) / \max(\text{compute}, \text{comm}) \times 100$.
+
+\subsection{Inference: Roofline}
+
+Ridge point (FLOPs/byte): $\text{ridge} = (F_{\text{peak,TFLOPS}} \cdot 10^{12}) / \mathrm{BW}_{\text{mem}}$.
+
+Arithmetic intensity: $\mathrm{AI} = \text{FLOPs} / \text{bytes accessed}$. Prefill: $\text{FLOPs} = F_{\text{fwd}}(S_{\text{in}}) \cdot B \cdot S_{\text{in}}$, bytes = full weights. Decode: FLOPs = $F_{\text{fwd}}(S_{\text{tot}})$ per token, bytes = active weights + KV cache for batch.
+
+Achievable TFLOPS: $\min(F_{\text{peak}} \cdot 10^{12},\, \mathrm{BW}_{\text{mem}} \cdot \mathrm{AI}) / 10^{12}$. Bound = compute if $\mathrm{AI} \ge \text{ridge}$, else memory.
+
+Decode GPU utilization (UI): $\text{decodeLatencySec} = M_{\text{active,weights}} / \mathrm{BW}_{\text{mem}}$; $\text{decodeActualFlops} = F_{\text{fwd}} / \text{decodeLatencySec}$; $\text{util\%} = \text{decodeActualFlops} / (F_{\text{peak}} \cdot 10^{12}) \times 100$.
+
+\section{Cost Analysis (UI)}
+
+\subsection{Training Cost}
+
+$\text{costPerGpuHour}$ = user or preset GPU \$/hr.
+\[
+\text{Total training cost} = \text{GPU-hours} \times \text{costPerGpuHour}.
+\]
+\[
+\text{Cost per trillion tokens} = \frac{\text{Total training cost}}{T / 10^{12}}.
+\]
+\[
+\text{Wall-clock hours} = \frac{\text{GPU-hours}}{N_{\text{gpus}}},
+\quad
+\text{Wall-clock days} = \frac{\text{Wall-clock hours}}{24}.
+\]
+
+\subsection{Inference Cost}
+
+Per 1M input tokens: $\text{costPer1MInput} = (10^6 / \text{prefillTokensPerSec}) \times (\text{costPerGpuHour} / 3600)$. Per 1M output tokens: $\text{costPer1MOutput} = (10^6 / \text{decodeTokensPerSec}) \times (\text{costPerGpuHour} / 3600)$.
+
+Batch-size sweep: same formulas at each batch size; decode bytes and thus decode tokens/s depend on $B$. Quantization sweep: same at each precision (weights and bytes per param change; decode tokens/s and \$/1M output change).
+
+\subsection{Monthly Serving Estimate}
+
+GPUs needed: $\text{reqPerSec} = \text{reqPerDay} / 86400$, $\text{secPerReq} = \text{secPerInputToken} \cdot \text{avgInputTok} + \text{secPerOutputToken} \cdot \text{avgOutputTok}$, $\text{gpusNeeded} = \lceil \text{reqPerSec} \cdot \text{secPerReq} \rceil$. Daily cost = (inputTokensPerDay/1e6)$\cdot$costPer1MInput + (outputTokensPerDay/1e6)$\cdot$costPer1MOutput; monthly = daily $\times$ 30.
 
 \section{Validation Metrics}
 
@@ -654,7 +713,7 @@ Metric & Our formula / source & Paper field \\
 Total parameters ($P_{\text{total}}$) & Parameter counting & \texttt{totalParamsB} \\
 Active parameters ($P_{\text{active}}$) & Parameter counting & \texttt{activeParamsB} \\
 GPU hours (training) & $t_{\text{train}} \cdot N_{\text{gpus}} / 3600$ & \texttt{gpuHoursReported} \\
-KV cache per token & $2 L (d_c + d^R_h) b_{\text{inf}}$ (MLA) or $2 L H_{\text{kv}} d_{\text{head}} b_{\text{inf}}$ & \texttt{kvCachePerTokenKB} \\
+KV cache per token & $L (d_c + d^R_h) b_{\text{inf}}$ (MLA) or $2 L H_{\text{kv}} d_{\text{head}} b_{\text{inf}}$ (GQA) & \texttt{kvCachePerTokenKB} \\
 Inference weights & $P_{\text{total}} \cdot b_{\text{inf}}$ & \texttt{inferenceWeightsGB} \\
 Training memory (peak) & $M_{\text{peak}}$ & \texttt{trainingMemoryGB} / \texttt{trainingMemoryTB} \\
 \bottomrule
