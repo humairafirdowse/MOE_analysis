@@ -116,7 +116,7 @@ P_{\text{dense}} = K_{\text{dense}} \cdot 3 \, d_{\text{model}} \, d_{\text{ff,d
 \]
 These layers are always active; $L_{\text{moe}}$ excludes them.
 
-\paragraph{Residual MLP (e.g.\ Snowflake Arctic)}
+\paragraph{Residual MLP}
 Each MoE layer may add a parallel dense MLP with intermediate $d_{\text{ff,res}}$:
 \[
 P_{\text{res,MLP}} = L_{\text{moe}} \cdot 3 d_{\text{model}} d_{\text{ff,res}}.
@@ -733,7 +733,6 @@ DeepSeek-V2 & 236 & 21 & --- & 67.5 & --- & --- \\
 DeepSeek-V3 & 671 & 37 & 2.788M & --- & --- & --- \\
 Mixtral 8x7B & 46.7 & 12.9 & --- & --- & 94 & --- \\
 Mixtral 8x22B & 141 & 39 & --- & --- & 283 & --- \\
-Snowflake Arctic & 480 & 17 & 504K & --- & --- & 7.5 TB \\
 \bottomrule
 \end{tabular}
 \end{table}
@@ -745,7 +744,6 @@ Snowflake Arctic & 480 & 17 & 504K & --- & --- & 7.5 TB \\
   $d_c = 512$, $d^R_h = 64$, $L = 60$; 93.3\% reduction vs MHA.
   \item \textbf{DeepSeek-V3} (arxiv:2412.19437): Table 1: 2.788M H800 GPU hours for full training.
   \item \textbf{Mixtral} (Mistral docs): 94 GB (8x7B), 283 GB (8x22B) for bf16 inference.
-  \item \textbf{Snowflake Arctic} (Snowflake blog): 3000 GPU weeks ($\approx$ 504K GPU-hours), 7.5 TB model state.
 \end{itemize}
 
 \end{document}

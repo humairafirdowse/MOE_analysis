@@ -13,7 +13,6 @@ const PRESET_LABELS: Record<PresetId, string> = {
   "deepseek-v3": "DeepSeek-V3",
   "mixtral-8x7b": "Mixtral 8x7B",
   "mixtral-8x22b": "Mixtral 8x22B",
-  "snowflake-arctic": "Snowflake Arctic",
   custom: "Custom"
 };
 

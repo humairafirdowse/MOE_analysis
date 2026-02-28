@@ -99,7 +99,6 @@ export type PresetId =
   | "deepseek-v3"
   | "mixtral-8x7b"
   | "mixtral-8x22b"
-  | "snowflake-arctic"
   | "custom";
 
 export interface PaperReferenceMetrics {
@@ -587,72 +586,6 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
         activeParamsB: 39,
         inferenceWeightsGB: 283,
         embeddingParamsM: 196.6
-      }
-    },
-    "snowflake-arctic": {
-      config: {
-        model: {
-          totalParamsB: 480,
-          dModel: 7168,
-          layers: 35,
-          layersMoe: 35,
-          firstKDenseReplace: 0,
-          denseIntermediateSize: undefined,
-          useResidualMLP: true,
-          residualMLPIntermediateSize: 4864,
-          useMLA: false,
-          tieWordEmbeddings: false,
-          nHeads: 56,
-          nKvHeads: 56,
-          dHead: 128,
-          vocabSize: 32000,
-          maxSeqLen: 4096
-        },
-        moe: {
-          numExperts: 128,
-          topK: 2,
-          numSharedExperts: 0,
-          dFf: 4864,
-          dSharedFf: 4864,
-          expertGranularity: "fine"
-        },
-        training: {
-          globalBatchTokens: 4096 * 4096,
-          totalTrainingTokens: 3.5e12,
-          precision: "bf16",
-          optimizer: "adam",
-          gradPrecision: "fp32",
-          activationCheckpointing: "selective",
-          useFlashAttention: true,
-          trainingGpuType: "H100-80G",
-          mfu: 0.24,
-          tp: 8,
-          ep: 16,
-          pp: 1,
-          dp: 8
-        },
-        inference: {
-          batchSize: 8,
-          inputSeqLen: 4096,
-          outputSeqLen: 256,
-          precision: "fp16",
-          gpuType: "H100-80G",
-          tp: 8,
-          ep: 2,
-          pp: 1,
-          dp: 1
-        }
-      },
-      ref: {
-        name: "Snowflake Arctic",
-        totalParamsB: 480,
-        activeParamsB: 17,
-        gpuHoursReported: 504000,
-        trainingMemoryTB: 7.5,
-        trainingCostUSD: 2_000_000,
-        numGpus: 1024,
-        expertParamsPerExpertB: 3.66,
-        embeddingParamsM: 229.4
       }
     },
     custom: {
