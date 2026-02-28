@@ -49,37 +49,6 @@ npm run dev
 
 Then open the printed `http://localhost:5173` URL in your browser.
 
-### Deploying to Vercel
-
-1. **Install Vercel CLI** (optional; you can also use the Vercel dashboard):
-
-   ```bash
-   npm i -g vercel
-   ```
-
-2. **From the project root**, deploy:
-
-   ```bash
-   vercel
-   ```
-
-   First run will ask you to log in and link the project. Accept defaults (Vite is auto-detected).
-
-3. **Production deploy**:
-
-   ```bash
-   vercel --prod
-   ```
-
-4. **Using the Vercel dashboard** (no CLI):
-
-   - Push the repo to GitHub/GitLab/Bitbucket.
-   - Go to [vercel.com](https://vercel.com) → **Add New Project** → import the repo.
-   - Vercel will detect Vite; use **Build Command**: `npm run build`, **Output Directory**: `dist`.
-   - Deploy. Future pushes to the main branch will auto-deploy.
-
-The repo includes a `vercel.json` that sets the output directory and SPA rewrites so client-side routing works.
-
 ### How the math is wired (Phase 1)
 
 - **Parameter counts** follow the spec:
