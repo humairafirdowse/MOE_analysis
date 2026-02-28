@@ -88,6 +88,10 @@ export interface InferenceConfig {
   outputSeqLen: number;
   precision: PrecisionInference;
   gpuType: GpuType;
+  tp: number;
+  ep: number;
+  pp: number;
+  dp: number;
 }
 
 export type PresetId =
@@ -116,6 +120,16 @@ export interface PaperReferenceMetrics {
   inferenceWeightsGB?: number;
   /** Training memory in TB (for very large models). */
   trainingMemoryTB?: number;
+  /** Training cost in USD as reported by the paper/blog. */
+  trainingCostUSD?: number;
+  /** Number of GPUs used for training. */
+  numGpus?: number;
+  /** Forward FLOPs per token in billions (10^9). */
+  forwardFlopsPerTokenB?: number;
+  /** Expert parameters per expert across all MoE layers, in billions. */
+  expertParamsPerExpertB?: number;
+  /** Embedding parameters in millions. */
+  embeddingParamsM?: number;
 }
 
 export interface DerivedOverviewMetrics {
@@ -124,6 +138,10 @@ export interface DerivedOverviewMetrics {
   attentionParams: number;
   expertParams: number;
   sharedExpertParams: number;
+  denseParams: number;
+  residualMLPParams: number;
+  gatingParams: number;
+  normParams: number;
   outputHeadParams: number;
   activeParams: number;
 }
@@ -301,6 +319,10 @@ export function computeOverview(
     attentionParams,
     expertParams,
     sharedExpertParams,
+    denseParams,
+    residualMLPParams,
+    gatingParams,
+    normParams,
     outputHeadParams,
     activeParams
   };
@@ -318,6 +340,7 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           layersMoe: 59,
           firstKDenseReplace: 1,
           denseIntermediateSize: 12288,
+          useResidualMLP: false,
           useMLA: true,
           mlaQLoraRank: 1536,
           mlaKvLoraRank: 512,
@@ -359,7 +382,11 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           inputSeqLen: 8192,
           outputSeqLen: 256,
           precision: "fp16",
-          gpuType: "A100-80G"
+          gpuType: "A100-80G",
+          tp: 4,
+          ep: 1,
+          pp: 1,
+          dp: 1
         }
       },
       ref: {
@@ -367,7 +394,8 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
         totalParamsB: 236,
         activeParamsB: 21,
         kvCachePerTokenKB: 67.5,
-        gpuHoursReported: undefined
+        gpuHoursReported: undefined,
+        embeddingParamsM: 524.3
       }
     },
     "deepseek-v3": {
@@ -421,14 +449,22 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           inputSeqLen: 4096,
           outputSeqLen: 256,
           precision: "fp16",
-          gpuType: "H100-80G"
+          gpuType: "H100-80G",
+          tp: 8,
+          ep: 4,
+          pp: 1,
+          dp: 1
         }
       },
       ref: {
         name: "DeepSeek-V3",
         totalParamsB: 671,
         activeParamsB: 37,
-        gpuHoursReported: 2.788e6
+        gpuHoursReported: 2.788e6,
+        kvCachePerTokenKB: 68.625,
+        trainingCostUSD: 5_576_000,
+        numGpus: 2048,
+        embeddingParamsM: 926.7
       }
     },
     "mixtral-8x7b": {
@@ -440,6 +476,7 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           layersMoe: 32,
           firstKDenseReplace: 0,
           denseIntermediateSize: undefined,
+          useResidualMLP: false,
           useMLA: false,
           tieWordEmbeddings: false,
           nHeads: 32,
@@ -476,14 +513,19 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           inputSeqLen: 8192,
           outputSeqLen: 256,
           precision: "fp16",
-          gpuType: "A100-80G"
+          gpuType: "A100-80G",
+          tp: 2,
+          ep: 1,
+          pp: 1,
+          dp: 1
         }
       },
       ref: {
         name: "Mixtral 8x7B",
         totalParamsB: 46.7,
         activeParamsB: 12.9,
-        inferenceWeightsGB: 94
+        inferenceWeightsGB: 94,
+        embeddingParamsM: 131.1
       }
     },
     "mixtral-8x22b": {
@@ -532,14 +574,19 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           inputSeqLen: 8192,
           outputSeqLen: 256,
           precision: "fp16",
-          gpuType: "A100-80G"
+          gpuType: "A100-80G",
+          tp: 4,
+          ep: 1,
+          pp: 1,
+          dp: 1
         }
       },
       ref: {
         name: "Mixtral 8x22B",
         totalParamsB: 141,
         activeParamsB: 39,
-        inferenceWeightsGB: 283
+        inferenceWeightsGB: 283,
+        embeddingParamsM: 196.6
       }
     },
     "snowflake-arctic": {
@@ -571,25 +618,29 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
         },
         training: {
           globalBatchTokens: 4096 * 4096,
-          totalTrainingTokens: 8e12,
+          totalTrainingTokens: 3.5e12,
           precision: "bf16",
           optimizer: "adam",
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: true,
           trainingGpuType: "H100-80G",
-          mfu: 0.45,
+          mfu: 0.24,
           tp: 8,
           ep: 16,
-          pp: 4,
-          dp: 16
+          pp: 1,
+          dp: 8
         },
         inference: {
           batchSize: 8,
           inputSeqLen: 4096,
           outputSeqLen: 256,
           precision: "fp16",
-          gpuType: "H100-80G"
+          gpuType: "H100-80G",
+          tp: 8,
+          ep: 2,
+          pp: 1,
+          dp: 1
         }
       },
       ref: {
@@ -597,7 +648,11 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
         totalParamsB: 480,
         activeParamsB: 17,
         gpuHoursReported: 504000,
-        trainingMemoryTB: 7.5
+        trainingMemoryTB: 7.5,
+        trainingCostUSD: 2_000_000,
+        numGpus: 1024,
+        expertParamsPerExpertB: 3.66,
+        embeddingParamsM: 229.4
       }
     },
     custom: {
@@ -656,7 +711,11 @@ const DEFAULT_INFERENCE: InferenceConfig = {
   inputSeqLen: 4096,
   outputSeqLen: 256,
   precision: "fp16",
-  gpuType: "H100-80G"
+  gpuType: "H100-80G",
+  tp: 8,
+  ep: 4,
+  pp: 1,
+  dp: 1
 };
 
 const DEFAULT_STATE: Omit<
@@ -679,6 +738,10 @@ const DEFAULT_STATE: Omit<
     attentionParams: 0,
     expertParams: 0,
     sharedExpertParams: 0,
+    denseParams: 0,
+    residualMLPParams: 0,
+    gatingParams: 0,
+    normParams: 0,
     outputHeadParams: 0,
     activeParams: 0
   }

@@ -17,106 +17,101 @@ export const TabRouting: React.FC = () => {
   );
 
   const moeActivePct = metrics.activeParamRatio * 100;
-
   const radarOption = buildRadarOption(metrics);
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
+      {/* KPIs */}
       <div className="section-card">
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <div className="text-xs font-semibold tracking-wide uppercase text-textMuted">
-              Routing & MoE Efficiency
-            </div>
-            <div className="text-[13px] text-textMuted mt-0.5">
-              How well the MoE design uses parameters compared to dense baselines.
-            </div>
-          </div>
-          <div className="text-right text-[11px] text-textMuted">
-            E={draftMoe.numExperts} · K={draftMoe.topK} · L={draftModel.layers}
-          </div>
-        </div>
+        <SectionTitle
+          title="Routing & MoE Efficiency"
+          subtitle="How well the MoE design uses parameters compared to dense baselines"
+          right={
+            <span className="text-[11px] text-textMuted/60 font-mono">
+              E={draftMoe.numExperts} K={draftMoe.topK} L={draftModel.layers}
+            </span>
+          }
+        />
 
-        <div className="kpi-grid">
+        <div className="kpi-grid mt-4">
           <KpiCard
-            label="Active/Total parameter ratio"
-            value={`${moeActivePct.toFixed(2)}%`}
-            sub={`K / E = ${draftMoe.topK} / ${draftMoe.numExperts || 1}`}
+            label="Expert activation ratio"
+            value={`${moeActivePct.toFixed(1)}%`}
+            sub={`K/E = ${draftMoe.topK}/${draftMoe.numExperts || 1}`}
+            accent="border-l-kpiBlue"
           />
           <KpiCard
-            label="Gating compute overhead"
+            label="Gating overhead"
             value={`${(metrics.gatingOverheadPct * 100).toFixed(2)}%`}
-            sub="Gating FLOPs as % of total forward FLOPs"
+            sub="% of total forward FLOPs"
+            accent="border-l-kpiAmber"
           />
           <KpiCard
-            label="Expert capacity (tokens/expert)"
+            label="Expert capacity"
             value={metrics.expertCapacityTokens.toFixed(0)}
-            sub="Capacity factor ≈ 1.25 · E⁻¹ · B·S·K"
+            sub="Tokens/expert (CF=1.25)"
+            accent="border-l-kpiGreen"
           />
           <KpiCard
-            label="Theoretical token drop rate"
+            label="Token drop rate"
             value={`${(metrics.theoreticalDropRate * 100).toFixed(2)}%`}
-            sub="Approximate probability of overflow at capacity"
+            sub="Theoretical overflow probability"
+            accent="border-l-kpiRose"
           />
         </div>
       </div>
 
+      {/* Comparison table */}
       <div className="section-card">
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <div className="text-xs font-semibold tracking-wide uppercase text-textMuted">
-              MoE vs Dense comparison
-            </div>
-            <div className="text-[13px] text-textMuted mt-0.5">
-              Per-token FLOPs for this MoE model vs dense equivalents.
-            </div>
-          </div>
-        </div>
+        <SectionTitle
+          title="MoE vs Dense Comparison"
+          subtitle="Per-token FLOPs across model configurations"
+        />
 
-        <div className="overflow-x-auto text-[12px]">
-          <table className="min-w-full">
+        <div className="overflow-x-auto mt-3">
+          <table className="min-w-full text-[12px]">
             <thead>
-              <tr className="border-b border-borderSoft/60 text-left">
-                <th className="py-1.5 pr-3 font-medium text-textMuted">Model</th>
-                <th className="py-1.5 pr-3 font-medium text-textMuted">Total Params</th>
-                <th className="py-1.5 pr-3 font-medium text-textMuted">Active Params</th>
-                <th className="py-1.5 pr-3 font-medium text-textMuted">FLOPs / token</th>
+              <tr className="border-b border-borderSoft/40 text-left">
+                <th className="py-2 pr-4 font-bold text-[10px] uppercase tracking-wider text-textMuted">Model</th>
+                <th className="py-2 pr-4 font-bold text-[10px] uppercase tracking-wider text-textMuted">Total Params</th>
+                <th className="py-2 pr-4 font-bold text-[10px] uppercase tracking-wider text-textMuted">Active Params</th>
+                <th className="py-2 pr-4 font-bold text-[10px] uppercase tracking-wider text-textMuted">FLOPs / token</th>
               </tr>
             </thead>
             <tbody>
-              <tr className="border-b border-borderSoft/30">
-                <td className="py-1.5 pr-3">This MoE model</td>
-                <td className="py-1.5 pr-3">
+              <tr className="border-b border-borderSoft/20">
+                <td className="py-2.5 pr-4 font-medium text-accent/80">This MoE model</td>
+                <td className="py-2.5 pr-4 text-textMuted">
                   {(draftOverview.totalParams / 1e9).toFixed(1)} B
                 </td>
-                <td className="py-1.5 pr-3">
+                <td className="py-2.5 pr-4 text-textMuted">
                   {(draftOverview.activeParams / 1e9).toFixed(1)} B
                 </td>
-                <td className="py-1.5 pr-3">
+                <td className="py-2.5 pr-4 font-semibold">
                   {(metrics.flopsMoePerToken / 1e9).toFixed(2)} B
                 </td>
               </tr>
-              <tr className="border-b border-borderSoft/30">
-                <td className="py-1.5 pr-3">Dense (same total params)</td>
-                <td className="py-1.5 pr-3">
+              <tr className="border-b border-borderSoft/20">
+                <td className="py-2.5 pr-4 text-textMuted/80">Dense (same total)</td>
+                <td className="py-2.5 pr-4 text-textMuted">
                   {(draftOverview.totalParams / 1e9).toFixed(1)} B
                 </td>
-                <td className="py-1.5 pr-3">
+                <td className="py-2.5 pr-4 text-textMuted">
                   {(draftOverview.totalParams / 1e9).toFixed(1)} B
                 </td>
-                <td className="py-1.5 pr-3">
+                <td className="py-2.5 pr-4 text-textMuted">
                   {(metrics.flopsDenseTotalPerToken / 1e9).toFixed(2)} B
                 </td>
               </tr>
               <tr>
-                <td className="py-1.5 pr-3">Dense (same active params)</td>
-                <td className="py-1.5 pr-3">
+                <td className="py-2.5 pr-4 text-textMuted/80">Dense (same active)</td>
+                <td className="py-2.5 pr-4 text-textMuted">
                   {(draftOverview.activeParams / 1e9).toFixed(1)} B
                 </td>
-                <td className="py-1.5 pr-3">
+                <td className="py-2.5 pr-4 text-textMuted">
                   {(draftOverview.activeParams / 1e9).toFixed(1)} B
                 </td>
-                <td className="py-1.5 pr-3">
+                <td className="py-2.5 pr-4 text-textMuted">
                   {(metrics.flopsDenseActivePerToken / 1e9).toFixed(2)} B
                 </td>
               </tr>
@@ -125,17 +120,13 @@ export const TabRouting: React.FC = () => {
         </div>
       </div>
 
+      {/* Radar */}
       <div className="section-card">
-        <div className="mb-3">
-          <div className="text-xs font-semibold tracking-wide uppercase text-textMuted">
-            Radar: MoE vs dense baselines
-          </div>
-          <div className="text-[13px] text-textMuted mt-0.5">
-            Qualitative comparison across compute efficiency, memory, parameter utilization,
-            communication overhead, and inference speed.
-          </div>
-        </div>
-        <div className="h-64">
+        <SectionTitle
+          title="Radar: MoE vs Dense"
+          subtitle="Qualitative comparison across compute, memory, utilization, communication and inference speed"
+        />
+        <div className="h-72 mt-2">
           <ReactECharts
             style={{ width: "100%", height: "100%" }}
             option={radarOption}
@@ -148,7 +139,7 @@ export const TabRouting: React.FC = () => {
 };
 
 function buildRadarOption(metrics: ReturnType<typeof computeRoutingEfficiencyMetrics>) {
-  const utilMoe = metrics.activeParamRatio; // 0..1
+  const utilMoe = metrics.activeParamRatio;
   const utilDense = 1;
 
   const computeEffMoe =
@@ -166,9 +157,9 @@ function buildRadarOption(metrics: ReturnType<typeof computeRoutingEfficiencyMet
       ? metrics.flopsDenseTotalPerToken / metrics.flopsMoePerToken
       : 1;
   const memEffDenseTotal = 1;
-  const memEffDenseActive = 1.2; // more compact model
+  const memEffDenseActive = 1.2;
 
-  const commOverMoe = 0.6; // more EP → more comm
+  const commOverMoe = 0.6;
   const commOverDenseTotal = 0.4;
   const commOverDenseActive = 0.3;
 
@@ -176,29 +167,27 @@ function buildRadarOption(metrics: ReturnType<typeof computeRoutingEfficiencyMet
   const infSpeedDenseTotal = 1;
   const infSpeedDenseActive = computeEffDenseActive * 1.05;
 
-  const maxVal = 2; // for all indicators
+  const maxVal = 2;
 
   return {
     backgroundColor: "transparent",
-    tooltip: {
-      confine: true
-    },
+    tooltip: { confine: true },
     legend: {
       data: ["MoE", "Dense (total)", "Dense (active)"],
-      textStyle: { color: "#e5e7eb", fontSize: 11 }
+      textStyle: { color: "#8494b0", fontSize: 11 }
     },
     radar: {
       indicator: [
-        { name: "Compute efficiency", max: maxVal },
-        { name: "Memory efficiency", max: maxVal },
-        { name: "Parameter utilization", max: maxVal },
-        { name: "Communication overhead (lower better)", max: maxVal },
+        { name: "Compute eff.", max: maxVal },
+        { name: "Memory eff.", max: maxVal },
+        { name: "Param util.", max: maxVal },
+        { name: "Comm. (lower=better)", max: maxVal },
         { name: "Inference speed", max: maxVal }
       ],
-      axisName: { color: "#9ca3af", fontSize: 11 },
-      splitLine: { lineStyle: { color: "#1f2937" } },
-      splitArea: { areaStyle: { color: ["#020617", "#020617"] } },
-      axisLine: { lineStyle: { color: "#1f2937" } }
+      axisName: { color: "#8494b0", fontSize: 10 },
+      splitLine: { lineStyle: { color: "#1a2540" } },
+      splitArea: { areaStyle: { color: ["#06080f", "#0a0f1e"] } },
+      axisLine: { lineStyle: { color: "#1a2540" } }
     },
     series: [
       {
@@ -212,7 +201,10 @@ function buildRadarOption(metrics: ReturnType<typeof computeRoutingEfficiencyMet
               Math.min(commOverMoe, maxVal),
               Math.min(infSpeedMoe, maxVal)
             ],
-            name: "MoE"
+            name: "MoE",
+            lineStyle: { color: "#38bdf8" },
+            itemStyle: { color: "#38bdf8" },
+            areaStyle: { color: "rgba(56,189,248,0.08)" }
           },
           {
             value: [
@@ -222,7 +214,10 @@ function buildRadarOption(metrics: ReturnType<typeof computeRoutingEfficiencyMet
               commOverDenseTotal,
               infSpeedDenseTotal
             ],
-            name: "Dense (total)"
+            name: "Dense (total)",
+            lineStyle: { color: "#a78bfa" },
+            itemStyle: { color: "#a78bfa" },
+            areaStyle: { color: "rgba(167,139,250,0.06)" }
           },
           {
             value: [
@@ -232,26 +227,42 @@ function buildRadarOption(metrics: ReturnType<typeof computeRoutingEfficiencyMet
               commOverDenseActive,
               Math.min(infSpeedDenseActive, maxVal)
             ],
-            name: "Dense (active)"
+            name: "Dense (active)",
+            lineStyle: { color: "#34d399" },
+            itemStyle: { color: "#34d399" },
+            areaStyle: { color: "rgba(52,211,153,0.06)" }
           }
-        ],
-        areaStyle: { opacity: 0.1 }
+        ]
       }
     ]
   };
 }
 
+const SectionTitle: React.FC<{
+  title: string;
+  subtitle?: string;
+  right?: React.ReactNode;
+}> = ({ title, subtitle, right }) => (
+  <div className="flex items-start justify-between">
+    <div>
+      <div className="section-header text-accent/90">{title}</div>
+      {subtitle && <div className="section-subtitle">{subtitle}</div>}
+    </div>
+    {right && <div className="mt-0.5">{right}</div>}
+  </div>
+);
+
 interface KpiCardProps {
   label: string;
   value: string;
   sub?: string;
+  accent?: string;
 }
 
-const KpiCard: React.FC<KpiCardProps> = ({ label, value, sub }) => (
-  <div className="kpi-card">
+const KpiCard: React.FC<KpiCardProps> = ({ label, value, sub, accent = "border-l-accent" }) => (
+  <div className={`kpi-card border-l-2 ${accent}`}>
     <div className="kpi-label">{label}</div>
     <div className="kpi-value">{value}</div>
     {sub && <div className="kpi-subvalue">{sub}</div>}
   </div>
 );
-

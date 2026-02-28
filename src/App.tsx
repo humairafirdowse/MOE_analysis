@@ -6,6 +6,8 @@ import { TabTrainingCompute } from "./components/TabTrainingCompute";
 import { TabTrainingMemory } from "./components/TabTrainingMemory";
 import { TabInference } from "./components/TabInference";
 import { TabParallelism } from "./components/TabParallelism";
+import { TabHardwareEfficiency } from "./components/TabHardwareEfficiency";
+import { TabCostAnalysis } from "./components/TabCostAnalysis";
 import { TabRouting } from "./components/TabRouting";
 import { TabValidation } from "./components/TabValidation";
 
@@ -16,25 +18,29 @@ const App: React.FC = () => {
     <div className="flex h-screen bg-background text-white">
       <Sidebar />
       <main className="flex-1 h-screen overflow-hidden flex flex-col">
-        <header className="px-5 pt-3 pb-2 border-b border-borderSoft/80 flex items-center justify-between bg-background/90 backdrop-blur">
+        <header className="px-6 pt-4 pb-3 border-b border-borderSoft/40 flex items-center justify-between bg-background/95 backdrop-blur-sm">
           <div>
-            <div className="text-[11px] uppercase tracking-[0.2em] text-textMuted">
-              MoE Theoretical Analysis Tool
+            <div className="text-lg font-bold tracking-tight">
+              MoE Analysis Dashboard
             </div>
-            <div className="text-sm font-semibold mt-0.5">MoE Analysis Dashboard</div>
+            <div className="text-[11px] text-textMuted/70 mt-0.5">
+              Theoretical analysis of Mixture-of-Experts architectures
+            </div>
           </div>
-          <div className="text-[11px] text-textMuted">
-            Change any value in the sidebar and all tabs update reactively.
+          <div className="text-[10px] text-textMuted/50 bg-surface/50 border border-borderSoft/30 rounded-lg px-3 py-1.5 font-medium">
+            All tabs update reactively
           </div>
         </header>
-        <section className="px-5 pt-3 flex-1 overflow-y-auto">
+        <section className="px-6 pt-4 flex-1 overflow-y-auto pb-8">
           <TabHeader active={activeTab} onChange={setActiveTab} />
-          <div className="mt-3 mb-4">
+          <div className="mt-4">
             {activeTab === "overview" && <TabModelOverview />}
             {activeTab === "training-compute" && <TabTrainingCompute />}
             {activeTab === "training-memory" && <TabTrainingMemory />}
             {activeTab === "inference" && <TabInference />}
             {activeTab === "parallelism" && <TabParallelism />}
+            {activeTab === "hw-efficiency" && <TabHardwareEfficiency />}
+            {activeTab === "cost" && <TabCostAnalysis />}
             {activeTab === "routing" && <TabRouting />}
             {activeTab === "validation" && <TabValidation />}
           </div>
@@ -45,4 +51,3 @@ const App: React.FC = () => {
 };
 
 export default App;
-

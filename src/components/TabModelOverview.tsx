@@ -39,6 +39,29 @@ export const TabModelOverview: React.FC = () => {
       total: draftOverview.sharedExpertParams,
       active: draftOverview.sharedExpertParams
     },
+    ...(draftOverview.denseParams > 0
+      ? [
+          {
+            component: "Dense FFN layers",
+            total: draftOverview.denseParams,
+            active: draftOverview.denseParams
+          }
+        ]
+      : []),
+    ...(draftOverview.residualMLPParams > 0
+      ? [
+          {
+            component: "Residual MLP",
+            total: draftOverview.residualMLPParams,
+            active: draftOverview.residualMLPParams
+          }
+        ]
+      : []),
+    {
+      component: "Gating / routing",
+      total: draftOverview.gatingParams,
+      active: draftOverview.gatingParams
+    },
     {
       component: "Output head",
       total: draftOverview.outputHeadParams,
@@ -50,97 +73,91 @@ export const TabModelOverview: React.FC = () => {
   const activeParamsB = draftOverview.activeParams / 1e9;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
+      {/* KPIs */}
       <div className="section-card">
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <div className="text-xs font-semibold tracking-wide uppercase text-textMuted">
-              Model Overview
-            </div>
-            <div className="text-[13px] text-textMuted mt-0.5">
-              What this MoE model looks like at a glance.
-            </div>
-          </div>
-          <div className="text-right text-[11px] text-textMuted">
-            d_model={draftModel.dModel} · L={draftModel.layers} · E={draftMoe.numExperts} · K=
-            {draftMoe.topK}
-          </div>
-        </div>
+        <SectionTitle
+          title="Model Overview"
+          subtitle="Parameter summary and architecture at a glance"
+          right={
+            <span className="text-[11px] text-textMuted/60 font-mono">
+              d={draftModel.dModel} L={draftModel.layers} E={draftMoe.numExperts} K={draftMoe.topK}
+            </span>
+          }
+        />
 
-        <div className="kpi-grid">
+        <div className="kpi-grid mt-4">
           <KpiCard
             label="Total parameters"
-            value={`${formatBigNumber(draftOverview.totalParams)} params`}
-            sub={`${totalParamsB.toFixed(1)}B total`}
+            value={`${totalParamsB.toFixed(1)}B`}
+            sub={formatBigNumber(draftOverview.totalParams) + " params"}
+            accent="border-l-kpiBlue"
           />
           <KpiCard
-            label="Active params per token"
-            value={`${formatBigNumber(draftOverview.activeParams)} params`}
-            sub={`${activeParamsB.toFixed(1)}B active`}
+            label="Active per token"
+            value={`${activeParamsB.toFixed(1)}B`}
+            sub={formatBigNumber(draftOverview.activeParams) + " params"}
+            accent="border-l-kpiGreen"
           />
           <KpiCard
-            label="Active / Total ratio"
-            value={(activeRatio * 100).toFixed(2) + "%"}
-            sub={`${activeParamsB.toFixed(1)}B / ${totalParamsB.toFixed(1)}B`}
+            label="Active / Total"
+            value={(activeRatio * 100).toFixed(1) + "%"}
+            sub={`${activeParamsB.toFixed(1)}B of ${totalParamsB.toFixed(1)}B`}
+            accent="border-l-kpiAmber"
           />
           <KpiCard
-            label="Equivalent dense model"
-            value={`${activeParamsB.toFixed(1)}B params`}
-            sub="Dense model with same active parameters"
+            label="Dense equivalent"
+            value={`${activeParamsB.toFixed(1)}B`}
+            sub="Model with same active params"
+            accent="border-l-kpiPurple"
           />
         </div>
       </div>
 
+      {/* Chart */}
       <div className="section-card">
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <div className="text-xs font-semibold tracking-wide uppercase text-textMuted">
-              Architecture Parameter Breakdown
-            </div>
-            <div className="text-[13px] text-textMuted mt-0.5">
-              Horizontal stacked bar showing how parameters are distributed across
-              components. Active parameters are solid; inactive expert capacity is ghosted.
-            </div>
-          </div>
-        </div>
+        <SectionTitle
+          title="Parameter Breakdown"
+          subtitle="Distribution across components — active (solid) vs inactive expert capacity (ghost)"
+        />
 
-        <div className="h-64">
+        <div className="h-72 mt-3">
           <ResponsiveContainer width="100%" height="100%">
             <BarChart
               data={chartData}
               layout="vertical"
-              margin={{ top: 8, right: 16, bottom: 8, left: 80 }}
+              margin={{ top: 8, right: 24, bottom: 8, left: 100 }}
               stackOffset="none"
             >
-              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" horizontal={false} />
+              <CartesianGrid strokeDasharray="3 3" stroke="#1a2540" horizontal={false} />
               <XAxis
                 type="number"
                 tickFormatter={(v) => `${(v / 1e9).toFixed(1)}B`}
-                stroke="#9ca3af"
+                stroke="#8494b0"
+                fontSize={11}
               />
               <YAxis
                 type="category"
                 dataKey="component"
-                stroke="#9ca3af"
-                width={80}
+                stroke="#8494b0"
+                width={95}
+                fontSize={11}
               />
               <Tooltip
                 contentStyle={{
-                  backgroundColor: "#020617",
-                  border: "1px solid #1e293b",
-                  borderRadius: "0.5rem",
-                  fontSize: 11
+                  backgroundColor: "#0a0f1e",
+                  border: "1px solid #1a2540",
+                  borderRadius: "0.75rem",
+                  fontSize: 11,
+                  boxShadow: "0 12px 30px rgba(0,0,0,0.5)"
                 }}
                 formatter={(value: number, key) => {
-                  if (key === "active") {
-                    return [`${formatBigNumber(value)} active`, "Active params"];
-                  }
-                  if (key === "inactive") {
-                    return [`${formatBigNumber(value)} inactive`, "Inactive params"];
-                  }
-                  if (key === "total") {
-                    return [`${formatBigNumber(value)} total`, "Total params"];
-                  }
+                  if (key === "active")
+                    return [`${formatBigNumber(value)} active`, "Active"];
+                  if (key === "inactive")
+                    return [`${formatBigNumber(value)} inactive`, "Inactive"];
+                  if (key === "total")
+                    return [`${formatBigNumber(value)} total`, "Total"];
                   return [value, key];
                 }}
               />
@@ -150,38 +167,34 @@ export const TabModelOverview: React.FC = () => {
                 stackId="params"
                 name="Active params"
                 fill="#38bdf8"
+                radius={[0, 4, 4, 0]}
               />
               <Bar
                 dataKey={(d) => Math.max(0, (d as any).total - (d as any).active)}
                 stackId="params"
                 name="Inactive params"
-                fill="#0f172a"
-                opacity={0.6}
+                fill="#1a2540"
+                opacity={0.7}
+                radius={[0, 4, 4, 0]}
               />
             </BarChart>
           </ResponsiveContainer>
         </div>
 
-        <div className="mt-3 grid grid-cols-2 gap-3 text-[11px] text-textMuted">
+        <div className="mt-4 grid grid-cols-2 gap-4 text-[11px] text-textMuted border-t border-borderSoft/30 pt-4">
           <div>
-            <div className="font-semibold mb-1">Key formulas</div>
-            <ul className="list-disc list-inside space-y-0.5">
-              <li>
-                P_total = P_embed + P_attn + P_experts + P_shared + P_output
-              </li>
-              <li>
-                P_active = P_embed + P_attn + K × P_single_expert × L + N_shared ×
-                P_shared_expert × L + P_output
-              </li>
+            <div className="font-bold text-white/70 mb-1.5 text-[10px] uppercase tracking-wider">Key formulas</div>
+            <ul className="formula-list">
+              <li>P_total = P_embed + P_attn + P_experts + P_shared + P_output</li>
+              <li>P_active = P_embed + P_attn + K x P_expert x L + N_shared x P_shared x L + P_output</li>
             </ul>
           </div>
           <div>
-            <div className="font-semibold mb-1">Dense baseline (ghost)</div>
+            <div className="font-bold text-white/70 mb-1.5 text-[10px] uppercase tracking-wider">Dense baseline</div>
             <div>
-              We treat a dense model with{" "}
-              <span className="text-accent">{denseEquivalentParams / 1e9}</span>B
-              parameters as the equivalent dense baseline for all reference
-              comparisons.
+              A dense model with{" "}
+              <span className="text-accent font-semibold">{(denseEquivalentParams / 1e9).toFixed(1)}B</span>{" "}
+              parameters is the equivalent dense baseline for compute comparisons.
             </div>
           </div>
         </div>
@@ -190,17 +203,33 @@ export const TabModelOverview: React.FC = () => {
   );
 };
 
+/* ─── Shared sub-components ─────────── */
+
+const SectionTitle: React.FC<{
+  title: string;
+  subtitle?: string;
+  right?: React.ReactNode;
+}> = ({ title, subtitle, right }) => (
+  <div className="flex items-start justify-between">
+    <div>
+      <div className="section-header text-accent/90">{title}</div>
+      {subtitle && <div className="section-subtitle">{subtitle}</div>}
+    </div>
+    {right && <div className="mt-0.5">{right}</div>}
+  </div>
+);
+
 interface KpiCardProps {
   label: string;
   value: string;
   sub?: string;
+  accent?: string;
 }
 
-const KpiCard: React.FC<KpiCardProps> = ({ label, value, sub }) => (
-  <div className="kpi-card">
+const KpiCard: React.FC<KpiCardProps> = ({ label, value, sub, accent = "border-l-accent" }) => (
+  <div className={`kpi-card border-l-2 ${accent}`}>
     <div className="kpi-label">{label}</div>
     <div className="kpi-value">{value}</div>
     {sub && <div className="kpi-subvalue">{sub}</div>}
   </div>
 );
-

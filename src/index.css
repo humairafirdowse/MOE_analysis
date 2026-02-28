@@ -4,6 +4,7 @@
 
 body {
   @apply bg-background text-white antialiased;
+  font-feature-settings: "cv02", "cv03", "cv04", "cv11";
 }
 
 *,
@@ -12,56 +13,127 @@ body {
   box-sizing: border-box;
 }
 
+/* Scrollbar */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  @apply bg-borderSoft/60 rounded-full;
+}
+::-webkit-scrollbar-thumb:hover {
+  @apply bg-borderSoft;
+}
+
+/* ── KPI cards ──────────────────────── */
+
 .kpi-grid {
-  @apply grid gap-4;
-  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  @apply grid gap-3;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
 }
 
 .kpi-card {
-  @apply bg-card/80 border border-borderSoft/60 rounded-xl px-4 py-3 shadow-soft backdrop-blur;
+  @apply bg-card border border-borderSoft/50 rounded-xl px-4 py-3 backdrop-blur
+         transition-shadow duration-200 hover:shadow-cardHover;
 }
 
 .kpi-label {
-  @apply text-xs uppercase tracking-wide text-textMuted mb-1;
+  @apply text-[10px] uppercase tracking-wider text-textMuted mb-1.5 font-medium;
 }
 
 .kpi-value {
-  @apply text-xl font-semibold;
+  @apply text-lg font-bold tracking-tight;
 }
 
 .kpi-subvalue {
-  @apply text-xs text-textMuted mt-1;
+  @apply text-[11px] text-textMuted mt-1 leading-tight;
 }
+
+/* ── Section cards ──────────────────── */
 
 .section-card {
-  @apply bg-surface/80 border border-borderSoft/60 rounded-2xl p-4 shadow-soft backdrop-blur;
+  @apply bg-surface/70 border border-borderSoft/40 rounded-2xl p-5 backdrop-blur;
 }
 
+.section-header {
+  @apply text-xs font-bold tracking-wider uppercase mb-0.5;
+}
+
+.section-subtitle {
+  @apply text-[12px] text-textMuted mt-0.5;
+}
+
+/* ── Tab buttons ────────────────────── */
+
 .tab-button {
-  @apply px-3 py-1.5 text-xs font-medium rounded-full border border-transparent text-textMuted hover:text-white hover:border-accent/60 transition-colors cursor-pointer;
+  @apply px-4 py-2 text-xs font-semibold rounded-lg border border-transparent
+         text-textMuted hover:text-white hover:bg-surface/80
+         transition-all duration-150 cursor-pointer select-none;
 }
 
 .tab-button-active {
-  @apply bg-accent/15 text-accent border-accent;
+  @apply bg-accent/10 text-accent border-accent/40 shadow-glow;
 }
 
+/* ── Sidebar ────────────────────────── */
+
 .sidebar-label {
-  @apply text-xs font-medium text-textMuted mb-1;
+  @apply text-[10px] font-semibold text-textMuted/80 mb-1 uppercase tracking-wider;
 }
 
 .sidebar-input {
-  @apply w-full rounded-lg bg-card/80 border border-borderSoft/60 px-2.5 py-1.5 text-xs text-white focus:outline-none focus:ring-1 focus:ring-accent focus:border-accent;
+  @apply w-full rounded-lg bg-background/80 border border-borderSoft/50
+         px-2.5 py-1.5 text-xs text-white
+         focus:outline-none focus:ring-1 focus:ring-accent/60 focus:border-accent/60
+         transition-colors;
 }
 
 .sidebar-select {
-  @apply sidebar-input;
+  @apply sidebar-input appearance-none cursor-pointer;
 }
 
 .sidebar-section {
-  @apply mb-4 space-y-1.5;
+  @apply space-y-2;
 }
 
 .sidebar-group-title {
-  @apply text-[11px] font-semibold tracking-wide uppercase text-textMuted/80 mb-1.5;
+  @apply text-[10px] font-bold tracking-widest uppercase mb-2;
 }
 
+/* ── Collapsible sidebar group ─────── */
+
+.sidebar-group {
+  @apply rounded-xl border border-borderSoft/30 overflow-hidden;
+}
+
+.sidebar-group-header {
+  @apply flex items-center gap-2.5 px-3 py-2.5 cursor-pointer select-none
+         transition-colors duration-150 hover:bg-white/[0.02];
+}
+
+.sidebar-group-dot {
+  @apply w-2 h-2 rounded-full shrink-0;
+}
+
+.sidebar-group-label {
+  @apply text-[11px] font-bold tracking-wide uppercase flex-1;
+}
+
+.sidebar-group-chevron {
+  @apply w-3.5 h-3.5 text-textMuted/60 transition-transform duration-200 shrink-0;
+}
+
+.sidebar-group-chevron.open {
+  @apply rotate-180;
+}
+
+.sidebar-group-body {
+  @apply px-3 pb-3 space-y-2;
+}
+
+/* ── Misc ───────────────────────────── */.formula-list {
+  @apply list-disc list-inside space-y-0.5 text-[11px] text-textMuted;
+}

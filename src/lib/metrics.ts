@@ -13,15 +13,16 @@ import { GpuSpec } from "./gpus";
 
 export function bytesPerParamTraining(precision: PrecisionTraining): number {
   if (precision === "fp32") return 4;
-  return 2; // bf16 / fp8
+  if (precision === "fp8") return 1;
+  return 2; // bf16
 }
 
 export function bytesPerParamInference(precision: PrecisionInference): number {
   switch (precision) {
     case "fp16":
     case "bf16":
-    case "fp8":
       return 2;
+    case "fp8":
     case "int8":
       return 1;
     case "int4":
@@ -126,6 +127,7 @@ export function forwardFlopsPerToken(
   sharedFfn: number;
   gating: number;
   denseFfn: number;
+  residualMlpFfn: number;
   total: number;
 } {
   const attention = attentionFlopsPerToken(model, seqLen);
@@ -134,8 +136,17 @@ export function forwardFlopsPerToken(
   const denseDff = model.denseIntermediateSize ?? moe.dFf;
   const denseFfn =
     numDense > 0 ? numDense * 6 * model.dModel * denseDff : 0;
-  const total = attention + moeFfn + sharedFfn + gating + denseFfn;
-  return { attention, moeFfn, sharedFfn, gating, denseFfn, total };
+
+  const L_moe = model.layersMoe ?? Math.max(0, model.layers - numDense);
+  const residualMLPDff =
+    model.residualMLPIntermediateSize ?? model.denseIntermediateSize ?? moe.dFf;
+  const residualMlpFfn =
+    model.useResidualMLP === true
+      ? L_moe * 6 * model.dModel * residualMLPDff
+      : 0;
+
+  const total = attention + moeFfn + sharedFfn + gating + denseFfn + residualMlpFfn;
+  return { attention, moeFfn, sharedFfn, gating, denseFfn, residualMlpFfn, total };
 }
 
 export function denseEquivalentForwardFlopsPerToken(
@@ -144,8 +155,8 @@ export function denseEquivalentForwardFlopsPerToken(
   seqLen: number
 ): number {
   const d = model.dModel;
-  const L_moe = model.layersMoe ?? model.layers;
   const numDense = model.firstKDenseReplace ?? 0;
+  const L_moe = model.layersMoe ?? Math.max(0, model.layers - numDense);
   const denseDff = model.denseIntermediateSize ?? moe.dFf;
 
   const attention = attentionFlopsPerToken(model, seqLen);
@@ -157,7 +168,14 @@ export function denseEquivalentForwardFlopsPerToken(
   const denseLayersFfn =
     numDense > 0 ? numDense * 6 * d * denseDff : 0;
 
-  return attention + moeDenseFfn + shared + denseLayersFfn;
+  const residualMLPDff =
+    model.residualMLPIntermediateSize ?? model.denseIntermediateSize ?? moe.dFf;
+  const residualMlpFfn =
+    model.useResidualMLP === true
+      ? L_moe * 6 * d * residualMLPDff
+      : 0;
+
+  return attention + moeDenseFfn + shared + denseLayersFfn + residualMlpFfn;
 }
 
 // ---- Training compute metrics ----
@@ -167,6 +185,8 @@ export interface TrainingComputeMetrics {
   moeFfnFlopsPerToken: number;
   sharedFfnFlopsPerToken: number;
   gatingFlopsPerToken: number;
+  denseFfnFlopsPerToken: number;
+  residualMlpFfnFlopsPerToken: number;
   forwardFlopsPerToken: number;
   backwardFlopsPerToken: number;
   totalFlopsPerToken: number;
@@ -174,6 +194,7 @@ export interface TrainingComputeMetrics {
   denseEquivalentFlopsPerToken: number;
   totalGpus: number;
   gpuHoursApprox: number;
+  trainingCostUSD: number;
 }
 
 export function computeTrainingComputeMetrics(
@@ -184,11 +205,8 @@ export function computeTrainingComputeMetrics(
   mfu: number
 ): TrainingComputeMetrics {
   const S = model.maxSeqLen;
-  const { attention, moeFfn, sharedFfn, gating, total } = forwardFlopsPerToken(
-    model,
-    moe,
-    S
-  );
+  const { attention, moeFfn, sharedFfn, gating, denseFfn, residualMlpFfn, total } =
+    forwardFlopsPerToken(model, moe, S);
   const denseEq = denseEquivalentForwardFlopsPerToken(model, moe, S);
 
   const forward = total;
@@ -217,19 +235,23 @@ export function computeTrainingComputeMetrics(
   const timeSecondsCluster =
     totalTrainingFlops / (effectivePerGpuTflops * totalGpus * 1e12);
   const gpuHours = (timeSecondsCluster * totalGpus) / 3600;
+  const trainingCostUSD = gpuHours * trainingGpu.costPerHourUSD;
 
   return {
     attentionFlopsPerToken: attention,
     moeFfnFlopsPerToken: moeFfn,
     sharedFfnFlopsPerToken: sharedFfn,
     gatingFlopsPerToken: gating,
+    denseFfnFlopsPerToken: denseFfn,
+    residualMlpFfnFlopsPerToken: residualMlpFfn,
     forwardFlopsPerToken: forward,
     backwardFlopsPerToken: backward,
     totalFlopsPerToken: perTokenTotal,
     totalTrainingFlops,
     denseEquivalentFlopsPerToken: denseEq,
     totalGpus,
-    gpuHoursApprox: gpuHours
+    gpuHoursApprox: gpuHours,
+    trainingCostUSD
   };
 }
 
@@ -257,9 +279,10 @@ export function computeTrainingMemoryMetrics(
 
   let optimizerBytesPerParam: number;
   if (training.optimizer === "adam") {
-    optimizerBytesPerParam = training.precision === "fp32" ? 12 : 8;
+    // fp32: m(4) + v(4) = 8; mixed-precision: master_fp32(4) + m(4) + v(4) = 12
+    optimizerBytesPerParam = training.precision === "fp32" ? 8 : 12;
   } else {
-    optimizerBytesPerParam = 8;
+    optimizerBytesPerParam = 4;
   }
   const optimizerBytes = totalParams * optimizerBytesPerParam;
 
@@ -334,17 +357,49 @@ export function computeTrainingMemoryMetrics(
 // ---- Inference metrics ----
 
 export interface InferenceMetrics {
+  // GPU / parallelism
+  totalGpus: number;
+  tp: number;
+  ep: number;
+  pp: number;
+  dp: number;
+
+  // FLOPs
   prefillFlopsPerToken: number;
   decodeFlopsPerToken: number;
+
+  // Latency
   prefillLatencyMs: number;
   decodeLatencyMsPerToken: number;
-  tokensPerSecond: number;
+  ttftMs: number;
+  interTokenLatencyMs: number;
+  totalDecodeTimeMs: number;
+  totalGenerationTimeMs: number;
+
+  // Throughput
+  prefillTokensPerSec: number;
+  decodeTokensPerSec: number;
+
+  // Memory (total cluster)
   weightsBytes: number;
   kvBytesPerToken: number;
   kvTotalBytes: number;
   totalBytes: number;
+
+  // Memory (per GPU)
+  weightsPerGpuBytes: number;
+  kvPerGpuBytes: number;
+  totalPerGpuBytes: number;
   maxBatchSizeByMemory: number;
-  seqSamples: { seqLen: number; kvGB: number; decodeMs: number }[];
+
+  // Sequence-length sweep
+  seqSamples: {
+    seqLen: number;
+    kvGB: number;
+    decodeMs: number;
+    ttftMs: number;
+    totalTimeMs: number;
+  }[];
 }
 
 export function computeInferenceMetrics(
@@ -354,37 +409,56 @@ export function computeInferenceMetrics(
   inference: InferenceConfig,
   gpu: GpuSpec
 ): InferenceMetrics {
-  const d = model.dModel;
   const L = model.layers;
 
   const bytesWeight = bytesPerParamInference(inference.precision);
 
+  const tp = Math.max(inference.tp ?? 1, 1);
+  const ep = Math.max(inference.ep ?? 1, 1);
+  const pp = Math.max(inference.pp ?? 1, 1);
+  const dp = Math.max(inference.dp ?? 1, 1);
+  const totalGpus = tp * ep * pp * dp;
+
   const S_in = inference.inputSeqLen;
-  const S_total = inference.inputSeqLen + inference.outputSeqLen;
+  const S_out = inference.outputSeqLen;
+  const S_total = S_in + S_out;
 
+  // Separate expert vs non-expert active params for EP-aware sharding
+  const numDenseLayers = model.firstKDenseReplace ?? 0;
+  const moeLayers = model.layersMoe ?? Math.max(0, model.layers - numDenseLayers);
+  const perExpert = 3 * model.dModel * moe.dFf; // SwiGLU
+  const activeExpertParams = moeLayers * moe.topK * perExpert;
+  const nonExpertActiveParams = Math.max(0, overview.activeParams - activeExpertParams);
+
+  // ── Precision-aware peak TFLOPS ──
+  const infPrecision = inference.precision;
+  const peakTflops =
+    (infPrecision === "fp8" || infPrecision === "int8")
+      ? (gpu.fp8Tflops ?? gpu.fp16Tflops)
+      : gpu.fp16Tflops;
+  const prefillUtil = 0.4;
+  const effectiveTflops = peakTflops * prefillUtil;
+
+  // ── FLOPs per token ──
   const forwardPrefill = forwardFlopsPerToken(model, moe, S_in).total;
-  const forwardDecode = forwardFlopsPerToken(model, moe, S_in).total;
+  const forwardDecode = forwardFlopsPerToken(model, moe, S_total).total;
 
-  const prefillFlopsTotal =
-    forwardPrefill * inference.batchSize * Math.max(S_in, 1);
-
-  const peakTflops = gpu.fp16Tflops;
-  const util = 0.4; // slightly higher for inference
-  const effectiveTflops = peakTflops * util;
-
+  // ── Prefill latency (compute-bound) ──
+  // TP shards compute; EP parallelises expert compute; PP is sequential per-stage
+  // Effective compute GPUs for a single request: tp * ep (PP stages are sequential)
+  const computeGpus = tp * ep;
+  const prefillFlopsTotal = forwardPrefill * inference.batchSize * Math.max(S_in, 1);
   const prefillLatencyMs =
-    prefillFlopsTotal / (effectiveTflops * 1e12) * 1000;
+    (prefillFlopsTotal / (computeGpus * effectiveTflops * 1e12)) * 1000;
 
-  // Decode is memory-bound: time ≈ bytes moved / bandwidth.
+  const prefillTokensProduced = inference.batchSize * Math.max(S_in, 1);
+  const prefillTokensPerSec =
+    prefillLatencyMs > 0 ? prefillTokensProduced / (prefillLatencyMs / 1000) : 0;
+
+  // ── Memory bandwidth (per GPU) ──
   const memBW = gpu.memBandwidthGBs * 1e9; // bytes/s
-  const decodeBytesPerToken = overview.activeParams * bytesWeight;
-  const decodeLatencySec = decodeBytesPerToken / memBW;
-  const decodeLatencyMsPerToken = decodeLatencySec * 1000;
-  const tokensPerSecond = decodeLatencySec > 0 ? 1 / decodeLatencySec : 0;
 
-  const weightsBytes = overview.totalParams * bytesWeight;
-
-  // KV cache memory. MLA caches (d_c + d_R_h) per layer per paper; standard uses n_kv_heads * d_head.
+  // ── KV cache ──
   const useMLACache =
     model.useMLA &&
     (model.mlaKvLoraRank ?? 0) > 0 &&
@@ -392,46 +466,96 @@ export function computeInferenceMetrics(
   const kvDimPerLayer = useMLACache
     ? model.mlaKvLoraRank! + model.mlaQkRopeHeadDim!
     : model.nKvHeads * model.dHead;
-  const kvBytesPerToken = 2 * L * kvDimPerLayer * bytesWeight;
-  const kvTotalBytes =
-    kvBytesPerToken * inference.batchSize * Math.max(S_total, 1);
+  const kvBytesPerToken = useMLACache
+    ? L * kvDimPerLayer * bytesWeight
+    : 2 * L * kvDimPerLayer * bytesWeight;
 
+  // ── Decode latency (memory-bound) ──
+  // Per-GPU bytes read per decode step: sharded weights + sharded KV cache
+  // Non-expert weights sharded by TP; expert weights sharded by TP * EP; KV sharded by TP
+  const nonExpertBytesPerGpu = nonExpertActiveParams * bytesWeight / tp;
+  const expertBytesPerGpu = activeExpertParams * bytesWeight / (tp * ep);
+  const activeWeightBytesPerGpu = nonExpertBytesPerGpu + expertBytesPerGpu;
+
+  const kvTotalBytes = kvBytesPerToken * inference.batchSize * Math.max(S_total, 1);
+  const kvPerGpuBytes = kvTotalBytes / tp;
+
+  const decodeBytesPerGpuPerStep = activeWeightBytesPerGpu + kvPerGpuBytes;
+  const decodeLatencySec = memBW > 0 ? decodeBytesPerGpuPerStep / memBW : 0;
+  const decodeLatencyMsPerToken = decodeLatencySec * 1000;
+
+  // Each decode step produces batchSize tokens (one per sequence)
+  const decodeTokensPerSec =
+    decodeLatencySec > 0 ? inference.batchSize / decodeLatencySec : 0;
+
+  // ── End-to-end timing ──
+  const ttftMs = prefillLatencyMs;
+  const interTokenLatencyMs = decodeLatencyMsPerToken;
+  const totalDecodeTimeMs = S_out * decodeLatencyMsPerToken;
+  const totalGenerationTimeMs = ttftMs + totalDecodeTimeMs;
+
+  // ── Memory totals ──
+  const weightsBytes = overview.totalParams * bytesWeight;
   const totalBytes = weightsBytes + kvTotalBytes;
 
-  const availableBytes = Math.max(gpu.hbmGB * 1e9 - weightsBytes, 0);
-  const denom = kvBytesPerToken * Math.max(S_total, 1);
-  const maxBatchSizeByMemory =
-    denom > 0 ? Math.floor(availableBytes / denom) : 0;
+  const modelParallelGpus = tp * ep * pp;
+  const weightsPerGpuBytes = weightsBytes / modelParallelGpus;
+  const totalPerGpuBytes = weightsPerGpuBytes + kvPerGpuBytes;
 
-  // Samples for KV vs seq_len + decode latency.
-  const seqSamples: { seqLen: number; kvGB: number; decodeMs: number }[] = [];
+  // ── Max batch by GPU memory ──
+  const availableBytesPerGpu = Math.max(gpu.hbmGB * 1e9 - weightsPerGpuBytes, 0);
+  const kvPerBatchPerSeq = kvBytesPerToken * Math.max(S_total, 1) / tp;
+  const maxBatchSizeByMemory =
+    kvPerBatchPerSeq > 0 ? Math.floor(availableBytesPerGpu / kvPerBatchPerSeq) : 0;
+
+  // ── Sequence-length sweep ──
+  const seqSamples: InferenceMetrics["seqSamples"] = [];
   const maxSeq = Math.max(model.maxSeqLen, S_total);
-  const samplePoints = [256, 512, 1024, 2048, 4096, maxSeq].filter(
+  const samplePoints = [256, 512, 1024, 2048, 4096, 8192, 16384, maxSeq].filter(
     (v, idx, arr) => idx === arr.indexOf(v) && v > 0 && v <= maxSeq
   );
 
   for (const seqLen of samplePoints) {
-    const kvBytes =
-      kvBytesPerToken * inference.batchSize * Math.max(seqLen, 1);
+    const kvBytes = kvBytesPerToken * inference.batchSize * Math.max(seqLen, 1);
     const kvGB = kvBytes / 1e9;
-    const decodeBytesThisSeq =
-      overview.activeParams * bytesWeight +
-      kvBytesPerToken * inference.batchSize * Math.max(seqLen, 1);
-    const decodeMs =
-      (decodeBytesThisSeq / memBW) * 1000;
-    seqSamples.push({ seqLen, kvGB, decodeMs });
+
+    const kvPerGpuThisSeq = kvBytes / tp;
+    const decodeBytesThisSeq = activeWeightBytesPerGpu + kvPerGpuThisSeq;
+    const decodeMs = memBW > 0 ? (decodeBytesThisSeq / memBW) * 1000 : 0;
+
+    // TTFT at this sequence length (assuming entire seqLen is input)
+    const fwdFlopsThisSeq = forwardFlopsPerToken(model, moe, seqLen).total;
+    const prefillFlopsThisSeq = fwdFlopsThisSeq * inference.batchSize * seqLen;
+    const ttftThisSeq = (prefillFlopsThisSeq / (computeGpus * effectiveTflops * 1e12)) * 1000;
+
+    const totalTimeThisSeq = ttftThisSeq + S_out * decodeMs;
+
+    seqSamples.push({ seqLen, kvGB, decodeMs, ttftMs: ttftThisSeq, totalTimeMs: totalTimeThisSeq });
   }
 
   return {
+    totalGpus,
+    tp,
+    ep,
+    pp,
+    dp,
     prefillFlopsPerToken: forwardPrefill,
     decodeFlopsPerToken: forwardDecode,
     prefillLatencyMs,
     decodeLatencyMsPerToken,
-    tokensPerSecond,
+    ttftMs,
+    interTokenLatencyMs,
+    totalDecodeTimeMs,
+    totalGenerationTimeMs,
+    prefillTokensPerSec,
+    decodeTokensPerSec,
     weightsBytes,
     kvBytesPerToken,
     kvTotalBytes,
     totalBytes,
+    weightsPerGpuBytes,
+    kvPerGpuBytes,
+    totalPerGpuBytes,
     maxBatchSizeByMemory,
     seqSamples
   };
@@ -474,7 +598,9 @@ export function computeParallelismMetrics(
   const tokensPerReplica = tokensPerStep / Math.max(training.dp, 1);
   const microBatchSeq = Math.max(tokensPerReplica / Math.max(S, 1), 1);
 
-  // All-to-all (EP) per MoE layer per step.
+  // All-to-all (EP) per MoE layer per step — only MoE layers incur EP traffic.
+  const numDenseLayers = model.firstKDenseReplace ?? 0;
+  const moeLayers = model.layersMoe ?? Math.max(0, model.layers - numDenseLayers);
   const allToAllPerLayer =
     2 *
     microBatchSeq *
@@ -482,7 +608,7 @@ export function computeParallelismMetrics(
     d *
     bytes *
     (training.ep > 0 ? (training.ep - 1) / training.ep : 0);
-  const allToAllBytesPerStep = allToAllPerLayer * model.layers;
+  const allToAllBytesPerStep = allToAllPerLayer * moeLayers;
 
   // AllReduce (TP) per layer.
   const allReduceTpPerLayer =
@@ -550,10 +676,9 @@ export function computeRoutingEfficiencyMetrics(
     moe.numExperts > 0 ? moe.topK / moe.numExperts : 0;
 
   const S = model.maxSeqLen;
-  const { attention, moeFfn, sharedFfn, gating, denseFfn, total } =
-    forwardFlopsPerToken(model, moe, S);
+  const fwd = forwardFlopsPerToken(model, moe, S);
 
-  const gatingOverheadPct = total > 0 ? gating / total : 0;
+  const gatingOverheadPct = fwd.total > 0 ? fwd.gating / fwd.total : 0;
 
   const tokensPerBatch = training.globalBatchTokens;
   const capacityFactor = 1.25;
@@ -572,7 +697,7 @@ export function computeRoutingEfficiencyMetrics(
     theoreticalDropRate = Math.min(Math.max(tail, 0), 1);
   }
 
-  const flopsMoePerToken = attention + moeFfn + sharedFfn + gating + denseFfn;
+  const flopsMoePerToken = fwd.total;
   const flopsDenseTotalPerToken = denseEquivalentForwardFlopsPerToken(
     model,
     moe,
@@ -591,6 +716,387 @@ export function computeRoutingEfficiencyMetrics(
     flopsMoePerToken,
     flopsDenseTotalPerToken,
     flopsDenseActivePerToken
+  };
+}
+
+// ---- Hardware efficiency metrics ----
+
+export interface HardwareEfficiencyMetrics {
+  // Training
+  mfu: number;
+  hfu: number;
+  recomputeMultiplier: number;
+  pipelineBubblePct: number;
+  numMicrobatches: number;
+  effectiveThroughputTokensPerSecPerGpu: number;
+  computeTimePerStepMs: number;
+  commTimePerStepMs: number;
+  computeCommOverlapPct: number;
+
+  // Inference roofline
+  prefillArithmeticIntensity: number;
+  decodeArithmeticIntensity: number;
+  ridgePointFlopsPerByte: number;
+  peakTflops: number;
+  memBWTBs: number;
+  prefillAchievableTflops: number;
+  decodeAchievableTflops: number;
+  prefillGpuUtil: number;
+  decodeGpuUtil: number;
+  prefillBound: "compute" | "memory";
+  decodeBound: "compute" | "memory";
+  rooflineCurve: { ai: number; tflops: number }[];
+  rooflinePoints: { label: string; ai: number; tflops: number }[];
+}
+
+export function computeHardwareEfficiencyMetrics(
+  model: ModelArchitectureConfig,
+  moe: MoeConfig,
+  overview: DerivedOverviewMetrics,
+  training: TrainingConfig,
+  trainingGpu: GpuSpec,
+  mfu: number,
+  inference: InferenceConfig,
+  inferenceGpu: GpuSpec,
+  parallelism: ParallelismMetrics
+): HardwareEfficiencyMetrics {
+  const S = model.maxSeqLen;
+  const fwd = forwardFlopsPerToken(model, moe, S);
+
+  // ── Training efficiency ───────────────────────────────────
+
+  const precision = training.precision;
+  const peakTrainTflops =
+    precision === "fp32"
+      ? trainingGpu.fp32Tflops
+      : precision === "fp8"
+        ? (trainingGpu.fp8TrainingTflops ??
+           trainingGpu.fp8Tflops ??
+           trainingGpu.fp16Tflops * 2)
+        : trainingGpu.fp16Tflops;
+
+  // HFU: includes recomputation FLOPs from activation checkpointing.
+  // none: no recompute → multiplier=1, sqrt/full: recompute full forward → multiplier=4/3
+  // selective: recompute only attention → multiplier = 1 + F_attn/(3F)
+  let recomputeMultiplier = 1.0;
+  switch (training.activationCheckpointing) {
+    case "sqrt":
+      recomputeMultiplier = 4 / 3;
+      break;
+    case "selective":
+      recomputeMultiplier = fwd.total > 0
+        ? 1 + fwd.attention / (3 * fwd.total)
+        : 1;
+      break;
+    case "none":
+    default:
+      recomputeMultiplier = 1.0;
+  }
+  const hfu = mfu * recomputeMultiplier;
+
+  // Pipeline bubble: bubble_fraction = (PP - 1) / num_microbatches (1F1B schedule)
+  const totalGpus = Math.max(1, training.tp * training.ep * training.pp * training.dp);
+  const tokensPerDp = training.globalBatchTokens / Math.max(training.dp, 1);
+  const numMicrobatches = Math.max(1, Math.floor(tokensPerDp / Math.max(S, 1)));
+  const pipelineBubblePct = training.pp > 1
+    ? ((training.pp - 1) / numMicrobatches) * 100
+    : 0;
+
+  // Effective throughput: tokens/sec/GPU
+  const effectiveTflops = peakTrainTflops * mfu;
+  const flopsPerToken3x = 3 * fwd.total;
+  const tokensPerSecPerGpu = flopsPerToken3x > 0
+    ? (effectiveTflops * 1e12) / flopsPerToken3x
+    : 0;
+
+  // Compute-comm overlap
+  const tokensPerStepPerGpu = training.globalBatchTokens / totalGpus;
+  const computeFlopsPerStep = flopsPerToken3x * tokensPerStepPerGpu;
+  const computeTimeMs = peakTrainTflops > 0
+    ? (computeFlopsPerStep / (peakTrainTflops * mfu * 1e12)) * 1000
+    : 0;
+  const interconnectBW = trainingGpu.interconnectBWGBs * 1e9;
+  const commTimeMs = interconnectBW > 0
+    ? (parallelism.totalBytesPerStep / interconnectBW) * 1000
+    : 0;
+  const computeCommOverlapPct = Math.max(computeTimeMs, commTimeMs) > 0
+    ? (Math.min(computeTimeMs, commTimeMs) / Math.max(computeTimeMs, commTimeMs)) * 100
+    : 100;
+
+  // ── Inference roofline ────────────────────────────────────
+
+  const bytesWeight = bytesPerParamInference(inference.precision);
+  const infPrecision = inference.precision;
+  const peakInfTflops = (infPrecision === "fp8" || infPrecision === "int8")
+    ? (inferenceGpu.fp8Tflops ?? inferenceGpu.fp16Tflops)
+    : inferenceGpu.fp16Tflops;
+  const memBWBytesPerSec = inferenceGpu.memBandwidthGBs * 1e9;
+  const memBWTBs = inferenceGpu.memBandwidthGBs / 1000;
+
+  const ridgePointFlopsPerByte = memBWBytesPerSec > 0
+    ? (peakInfTflops * 1e12) / memBWBytesPerSec
+    : 1;
+
+  const fwdInf = forwardFlopsPerToken(model, moe, inference.inputSeqLen);
+  const weightsBytes = overview.totalParams * bytesWeight;
+  const activeWeightsBytes = overview.activeParams * bytesWeight;
+
+  // Prefill: batch × seq tokens processed, weights read once
+  const prefillTotalFlops = fwdInf.total * inference.batchSize * Math.max(inference.inputSeqLen, 1);
+  const prefillBytesAccessed = weightsBytes;
+  const prefillArithmeticIntensity = prefillBytesAccessed > 0
+    ? prefillTotalFlops / prefillBytesAccessed
+    : 0;
+
+  // Decode: single token, read active weights + KV cache
+  const useMLACache =
+    model.useMLA &&
+    (model.mlaKvLoraRank ?? 0) > 0 &&
+    (model.mlaQkRopeHeadDim ?? 0) > 0;
+  const kvDimPerLayer = useMLACache
+    ? model.mlaKvLoraRank! + model.mlaQkRopeHeadDim!
+    : model.nKvHeads * model.dHead;
+  const kvBytesPerToken = useMLACache
+    ? model.layers * kvDimPerLayer * bytesWeight
+    : 2 * model.layers * kvDimPerLayer * bytesWeight;
+  const S_total = inference.inputSeqLen + inference.outputSeqLen;
+  const kvCacheBytesTotal = kvBytesPerToken * inference.batchSize * S_total;
+  const decodeBytesAccessed = activeWeightsBytes + kvCacheBytesTotal;
+  const decodeFwdFlops = fwdInf.total;
+  const decodeArithmeticIntensity = decodeBytesAccessed > 0
+    ? decodeFwdFlops / decodeBytesAccessed
+    : 0;
+
+  // Achievable TFLOPS on roofline
+  const roofline = (ai: number) =>
+    Math.min(memBWBytesPerSec * ai, peakInfTflops * 1e12) / 1e12;
+
+  const prefillAchievableTflops = roofline(prefillArithmeticIntensity);
+  const decodeAchievableTflops = roofline(decodeArithmeticIntensity);
+
+  const prefillBound: "compute" | "memory" =
+    prefillArithmeticIntensity >= ridgePointFlopsPerByte ? "compute" : "memory";
+  const decodeBound: "compute" | "memory" =
+    decodeArithmeticIntensity >= ridgePointFlopsPerByte ? "compute" : "memory";
+
+  // GPU utilization: actual FLOPS / peak FLOPS
+  const decodeLatencySec = activeWeightsBytes / memBWBytesPerSec;
+  const decodeActualFlops = decodeLatencySec > 0 ? decodeFwdFlops / decodeLatencySec : 0;
+  const decodeGpuUtil = peakInfTflops > 0
+    ? (decodeActualFlops / (peakInfTflops * 1e12)) * 100
+    : 0;
+  const prefillUtil = 0.4;
+  const prefillGpuUtil = prefillUtil * 100;
+
+  // Roofline curve data (log-spaced AI values)
+  const rooflineCurve: { ai: number; tflops: number }[] = [];
+  for (let exp = -1; exp <= 5; exp += 0.15) {
+    const ai = Math.pow(10, exp);
+    rooflineCurve.push({ ai, tflops: roofline(ai) });
+  }
+
+  const rooflinePoints = [
+    { label: "Prefill", ai: prefillArithmeticIntensity, tflops: prefillAchievableTflops },
+    { label: "Decode", ai: decodeArithmeticIntensity, tflops: decodeAchievableTflops }
+  ];
+
+  return {
+    mfu,
+    hfu,
+    recomputeMultiplier,
+    pipelineBubblePct,
+    numMicrobatches,
+    effectiveThroughputTokensPerSecPerGpu: tokensPerSecPerGpu,
+    computeTimePerStepMs: computeTimeMs,
+    commTimePerStepMs: commTimeMs,
+    computeCommOverlapPct,
+    prefillArithmeticIntensity,
+    decodeArithmeticIntensity,
+    ridgePointFlopsPerByte,
+    peakTflops: peakInfTflops,
+    memBWTBs,
+    prefillAchievableTflops,
+    decodeAchievableTflops,
+    prefillGpuUtil,
+    decodeGpuUtil,
+    prefillBound,
+    decodeBound,
+    rooflineCurve,
+    rooflinePoints
+  };
+}
+
+// ---- Cost analysis metrics ----
+
+export interface CostAnalysisMetrics {
+  // Training
+  gpuHours: number;
+  costPerGpuHour: number;
+  totalTrainingCost: number;
+  costPerTrillionTokens: number;
+  wallClockHours: number;
+  wallClockDays: number;
+  totalGpus: number;
+  totalTrainingTokens: number;
+
+  // Inference (at configured batch/precision)
+  prefillTokensPerSec: number;
+  decodeTokensPerSec: number;
+  costPer1MInputTokens: number;
+  costPer1MOutputTokens: number;
+
+  // Batch size sweep
+  batchSweep: {
+    batchSize: number;
+    decodeTokensPerSec: number;
+    costPer1MOutput: number;
+    costPer1MInput: number;
+  }[];
+
+  // Quantization sweep
+  quantSweep: {
+    precision: PrecisionInference;
+    label: string;
+    weightsGB: number;
+    decodeTokensPerSec: number;
+    costPer1MOutput: number;
+    relativeToFp16: number;
+  }[];
+}
+
+export function computeCostAnalysisMetrics(
+  model: ModelArchitectureConfig,
+  moe: MoeConfig,
+  overview: DerivedOverviewMetrics,
+  training: TrainingConfig,
+  trainingGpu: GpuSpec,
+  mfu: number,
+  inference: InferenceConfig,
+  inferenceGpu: GpuSpec,
+  trainingCompute: TrainingComputeMetrics
+): CostAnalysisMetrics {
+  const costPerGpuHour = trainingGpu.costPerHourUSD;
+  const gpuHours = trainingCompute.gpuHoursApprox;
+  const totalTrainingCost = trainingCompute.trainingCostUSD;
+  const totalGpus = trainingCompute.totalGpus;
+  const totalTrainingTokens = training.totalTrainingTokens;
+
+  const costPerTrillionTokens = totalTrainingTokens > 0
+    ? totalTrainingCost / (totalTrainingTokens / 1e12)
+    : 0;
+
+  const wallClockHours = totalGpus > 0 ? gpuHours / totalGpus : 0;
+  const wallClockDays = wallClockHours / 24;
+
+  // ── Inference costs ─────────────────────────────────────
+
+  const infCostPerSec = inferenceGpu.costPerHourUSD / 3600;
+  const memBW = inferenceGpu.memBandwidthGBs * 1e9;
+  const bytesWeight = bytesPerParamInference(inference.precision);
+  const fwdFlops = forwardFlopsPerToken(model, moe, inference.inputSeqLen).total;
+
+  // MLA-aware KV cache per token
+  const useMLACache =
+    model.useMLA &&
+    (model.mlaKvLoraRank ?? 0) > 0 &&
+    (model.mlaQkRopeHeadDim ?? 0) > 0;
+  const kvDimPerLayer = useMLACache
+    ? model.mlaKvLoraRank! + model.mlaQkRopeHeadDim!
+    : model.nKvHeads * model.dHead;
+  const kvBytesPerTokenFn = (bw: number) => useMLACache
+    ? model.layers * kvDimPerLayer * bw
+    : 2 * model.layers * kvDimPerLayer * bw;
+
+  const peakInfTflops = (inference.precision === "fp8" || inference.precision === "int8")
+    ? (inferenceGpu.fp8Tflops ?? inferenceGpu.fp16Tflops)
+    : inferenceGpu.fp16Tflops;
+  const prefillUtil = 0.4;
+  const effectiveInfTflops = peakInfTflops * prefillUtil;
+
+  // Helper: compute inference cost at a given batch size and precision
+  function inferCostAtBatchPrec(batchSize: number, prec: PrecisionInference) {
+    const bpp = bytesPerParamInference(prec);
+    const activeWeightBytes = overview.activeParams * bpp;
+    const totalWeightBytes = overview.totalParams * bpp;
+    const kvPerToken = kvBytesPerTokenFn(bpp);
+    const S_total = inference.inputSeqLen + inference.outputSeqLen;
+
+    // Prefill: compute-bound, process B × S_in tokens
+    const prefillFlopsTotal = fwdFlops * batchSize * Math.max(inference.inputSeqLen, 1);
+    const prefillTimeSec = prefillFlopsTotal / (effectiveInfTflops * 1e12);
+    const prefillTokensProduced = batchSize * Math.max(inference.inputSeqLen, 1);
+    const prefillTPS = prefillTimeSec > 0 ? prefillTokensProduced / prefillTimeSec : 0;
+
+    // Decode: memory-bound, read weights + KV cache per step, produces B tokens
+    const decodeBytesPerStep = activeWeightBytes + kvPerToken * batchSize * S_total;
+    const decodeTimeSec = memBW > 0 ? decodeBytesPerStep / memBW : 0;
+    const decodeTPS = decodeTimeSec > 0 ? batchSize / decodeTimeSec : 0;
+
+    const gpuCostPerSec = inferenceGpu.costPerHourUSD / 3600;
+    const costPer1MInput = prefillTPS > 0 ? (1e6 / prefillTPS) * gpuCostPerSec : 0;
+    const costPer1MOutput = decodeTPS > 0 ? (1e6 / decodeTPS) * gpuCostPerSec : 0;
+
+    return {
+      prefillTPS,
+      decodeTPS,
+      costPer1MInput,
+      costPer1MOutput,
+      weightsGB: totalWeightBytes / 1e9
+    };
+  }
+
+  const base = inferCostAtBatchPrec(inference.batchSize, inference.precision);
+
+  // Batch size sweep
+  const batchSizes = [1, 4, 8, 16, 32, 64, 128];
+  const batchSweep = batchSizes.map((bs) => {
+    const r = inferCostAtBatchPrec(bs, inference.precision);
+    return {
+      batchSize: bs,
+      decodeTokensPerSec: r.decodeTPS,
+      costPer1MOutput: r.costPer1MOutput,
+      costPer1MInput: r.costPer1MInput
+    };
+  });
+
+  // Quantization sweep
+  const precisions: { prec: PrecisionInference; label: string }[] = [
+    { prec: "fp16", label: "FP16" },
+    { prec: "bf16", label: "BF16" },
+    { prec: "fp8", label: "FP8" },
+    { prec: "int8", label: "INT8" },
+    { prec: "int4", label: "INT4" }
+  ];
+  const fp16Base = inferCostAtBatchPrec(inference.batchSize, "fp16");
+  const quantSweep = precisions.map(({ prec, label }) => {
+    const r = inferCostAtBatchPrec(inference.batchSize, prec);
+    return {
+      precision: prec,
+      label,
+      weightsGB: r.weightsGB,
+      decodeTokensPerSec: r.decodeTPS,
+      costPer1MOutput: r.costPer1MOutput,
+      relativeToFp16: fp16Base.costPer1MOutput > 0
+        ? fp16Base.costPer1MOutput / r.costPer1MOutput
+        : 1
+    };
+  });
+
+  return {
+    gpuHours,
+    costPerGpuHour,
+    totalTrainingCost,
+    costPerTrillionTokens,
+    wallClockHours,
+    wallClockDays,
+    totalGpus,
+    totalTrainingTokens,
+    prefillTokensPerSec: base.prefillTPS,
+    decodeTokensPerSec: base.decodeTPS,
+    costPer1MInputTokens: base.costPer1MInput,
+    costPer1MOutputTokens: base.costPer1MOutput,
+    batchSweep,
+    quantSweep
   };
 }
 

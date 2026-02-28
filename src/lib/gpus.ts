@@ -5,12 +5,14 @@ export interface GpuSpec {
   name: string;
   fp16Tflops: number;
   fp32Tflops: number;
-  /** FP8 peak TFLOPS (Hopper: ~2× FP16). Used for inference / theoretical peak. */
+  /** FP8 peak TFLOPS (Hopper: ~2x FP16). Used for inference / theoretical peak. */
   fp8Tflops?: number;
   /** FP8 effective for training (memory-bandwidth limited). If set, used for GPU-hours when precision=fp8. */
   fp8TrainingTflops?: number;
   hbmGB: number;
   memBandwidthGBs: number;
+  /** Per-GPU unidirectional interconnect bandwidth in GB/s (NVLink or PCIe). */
+  interconnectBWGBs: number;
   costPerHourUSD: number;
 }
 
@@ -22,6 +24,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     fp32Tflops: 19.5,
     hbmGB: 80,
     memBandwidthGBs: 2039,
+    interconnectBWGBs: 300,
     costPerHourUSD: 5.0
   },
   "H100-80G": {
@@ -32,6 +35,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     fp8Tflops: 1978,
     hbmGB: 80,
     memBandwidthGBs: 3350,
+    interconnectBWGBs: 450,
     costPerHourUSD: 8.5
   },
   "H800-80G": {
@@ -40,10 +44,10 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     fp16Tflops: 756,
     fp32Tflops: 51,
     fp8Tflops: 1512,
-    // FP8 training is memory-bandwidth limited on H800 (2 TB/s vs H100 3.35); use effective peak so GPU-hours match paper 2.788M.
     fp8TrainingTflops: 738,
     hbmGB: 80,
     memBandwidthGBs: 2000,
+    interconnectBWGBs: 200,
     costPerHourUSD: 2.0
   },
   "H200-141G": {
@@ -54,6 +58,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     fp8Tflops: 1978,
     hbmGB: 141,
     memBandwidthGBs: 4800,
+    interconnectBWGBs: 450,
     costPerHourUSD: 12.0
   },
   "B200-192G": {
@@ -64,6 +69,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     fp8Tflops: 4500,
     hbmGB: 192,
     memBandwidthGBs: 8000,
+    interconnectBWGBs: 900,
     costPerHourUSD: 18.0
   },
   "RTX-4090": {
@@ -73,6 +79,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     fp32Tflops: 82.6,
     hbmGB: 24,
     memBandwidthGBs: 1008,
+    interconnectBWGBs: 32,
     costPerHourUSD: 0.7
   },
   "M4-Max": {
@@ -82,6 +89,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     fp32Tflops: 9.7,
     hbmGB: 128,
     memBandwidthGBs: 546,
+    interconnectBWGBs: 100,
     costPerHourUSD: 0
   }
 };
@@ -89,4 +97,3 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
 export function getGpuSpec(type: GpuType): GpuSpec {
   return GPU_SPECS[type];
 }
-

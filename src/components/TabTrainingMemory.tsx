@@ -30,113 +30,110 @@ export const TabTrainingMemory: React.FC = () => {
   const perGpuGB = mem.perGpuBytes / 1e9;
 
   return (
-    <div className="flex flex-col gap-4">
+    <div className="flex flex-col gap-5">
       <div className="section-card">
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <div className="text-xs font-semibold tracking-wide uppercase text-textMuted">
-              Training Memory
+        <SectionTitle
+          title="Training Memory"
+          subtitle="Parameter, optimizer, gradient and activation memory at training time"
+          right={
+            <div className="text-right text-[11px] text-textMuted/60">
+              <span className="font-semibold text-white/60">{gpu.name}</span>
+              <div className="mt-0.5">
+                VRAM {gpu.hbmGB} GB · {draftTraining.precision.toUpperCase()}
+              </div>
             </div>
-            <div className="text-[13px] text-textMuted mt-0.5">
-              Parameter, optimizer, gradient and activation memory at training time.
-            </div>
-          </div>
-          <div className="text-right text-[11px] text-textMuted">
-            GPU: <span className="font-semibold">{gpu.name}</span>
-            <div>
-              VRAM: {gpu.hbmGB} GB · Precision: {draftTraining.precision.toUpperCase()}
-            </div>
-          </div>
-        </div>
+          }
+        />
 
-        <div className="kpi-grid">
+        <div className="kpi-grid mt-4">
           <KpiCard
-            label="Model parameters"
-            value={`${(mem.paramsBytes / 1e9).toFixed(2)} GB`}
-            sub={`${formatBigNumber(draftOverview.totalParams)} params`}
+            label="Model weights"
+            value={`${(mem.paramsBytes / 1e9).toFixed(1)} GB`}
+            sub={formatBigNumber(draftOverview.totalParams) + " params"}
+            accent="border-l-kpiBlue"
           />
           <KpiCard
             label="Optimizer state"
-            value={`${(mem.optimizerBytes / 1e9).toFixed(2)} GB`}
-            sub={draftTraining.optimizer === "adam" ? "Adam (m, v, master)" : "AdaFactor-style"}
+            value={`${(mem.optimizerBytes / 1e9).toFixed(1)} GB`}
+            sub={draftTraining.optimizer === "adam" ? "Adam (master + m + v)" : "AdaFactor"}
+            accent="border-l-kpiPurple"
           />
           <KpiCard
             label="Gradients"
-            value={`${(mem.gradientBytes / 1e9).toFixed(2)} GB`}
-            sub="Typically FP32 gradients"
+            value={`${(mem.gradientBytes / 1e9).toFixed(1)} GB`}
+            sub={`${draftTraining.gradPrecision.toUpperCase()} precision`}
+            accent="border-l-kpiAmber"
           />
           <KpiCard
             label="Activations"
-            value={`${(mem.activationsBytes / 1e9).toFixed(2)} GB`}
-            sub="Approx. checkpointed activations"
+            value={`${(mem.activationsBytes / 1e9).toFixed(1)} GB`}
+            sub={draftTraining.activationCheckpointing + " checkpointing"}
+            accent="border-l-kpiGreen"
           />
           <KpiCard
-            label="Peak training memory"
-            value={`${totalGB.toFixed(2)} GB`}
-            sub="Params + optimizer + grads + activations"
+            label="Peak total"
+            value={totalGB >= 1000 ? `${(totalGB / 1000).toFixed(2)} TB` : `${totalGB.toFixed(1)} GB`}
+            sub="Params + optimizer + grads + acts"
+            accent="border-l-kpiRose"
           />
           <KpiCard
-            label="Memory per GPU"
-            value={`${perGpuGB.toFixed(2)} GB`}
-            sub="After TP/EP/PP sharding"
+            label="Per GPU"
+            value={`${perGpuGB.toFixed(1)} GB`}
+            sub="After TP×EP×PP sharding"
+            accent="border-l-accent"
           />
         </div>
       </div>
 
       <div className="section-card">
-        <div className="flex items-center justify-between mb-3">
-          <div>
-            <div className="text-xs font-semibold tracking-wide uppercase text-textMuted">
-              Memory breakdown
-            </div>
-            <div className="text-[13px] text-textMuted mt-0.5">
-              Shows why optimizer state and activations usually dominate training memory.
-            </div>
-          </div>
-        </div>
+        <SectionTitle
+          title="Memory Breakdown"
+          subtitle="Optimizer state and activations usually dominate training memory"
+        />
 
-        <div className="h-64">
+        <div className="h-64 mt-3">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={segments} layout="vertical" margin={{ top: 8, right: 16, bottom: 8, left: 120 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" horizontal={false} />
+            <BarChart data={segments} layout="vertical" margin={{ top: 8, right: 24, bottom: 8, left: 130 }}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#1a2540" horizontal={false} />
               <XAxis
                 type="number"
                 dataKey="bytes"
-                tickFormatter={(v) => `${(v / 1e9).toFixed(1)} GB`}
-                stroke="#9ca3af"
+                tickFormatter={(v) => `${(v / 1e9).toFixed(0)} GB`}
+                stroke="#8494b0"
+                fontSize={11}
               />
-              <YAxis type="category" dataKey="name" stroke="#9ca3af" width={120} />
+              <YAxis type="category" dataKey="name" stroke="#8494b0" width={120} fontSize={11} />
               <Tooltip
                 contentStyle={{
-                  backgroundColor: "#020617",
-                  border: "1px solid #1e293b",
-                  borderRadius: "0.5rem",
-                  fontSize: 11
+                  backgroundColor: "#0a0f1e",
+                  border: "1px solid #1a2540",
+                  borderRadius: "0.75rem",
+                  fontSize: 11,
+                  boxShadow: "0 12px 30px rgba(0,0,0,0.5)"
                 }}
-                formatter={(value: number) => [`${(value / 1e9).toFixed(2)} GB`, "Memory"]}
+                formatter={(value: number) => [`${(value / 1e9).toFixed(1)} GB`, "Memory"]}
               />
               <Legend />
-              <Bar dataKey="bytes" name="Memory" fill="#38bdf8" />
+              <Bar dataKey="bytes" name="Memory (bytes)" fill="#a78bfa" radius={[0, 6, 6, 0]} maxBarSize={40} />
             </BarChart>
           </ResponsiveContainer>
         </div>
 
-        <div className="mt-3 text-[11px] text-textMuted grid grid-cols-2 gap-3">
+        <div className="mt-4 grid grid-cols-2 gap-4 text-[11px] text-textMuted border-t border-borderSoft/30 pt-4">
           <div>
-            <div className="font-semibold mb-1">Key formulas</div>
-            <ul className="list-disc list-inside space-y-0.5">
-              <li>Params = P_total × bytes_per_param</li>
-              <li>Adam (fp32 master) ≈ 12 bytes per param</li>
-              <li>Gradients ≈ P_total × 4 bytes</li>
-              <li>Activations ≈ O(B × S × d_model) per layer</li>
+            <div className="font-bold text-white/70 mb-1.5 text-[10px] uppercase tracking-wider">Key formulas</div>
+            <ul className="formula-list">
+              <li>Weights = P_total x bytes_per_param</li>
+              <li>Adam (mixed) = 12 bytes/param (master+m+v)</li>
+              <li>Gradients = P_total x 4 bytes (FP32)</li>
+              <li>Activations = O(B x S x d) per layer</li>
             </ul>
           </div>
           <div>
-            <div className="font-semibold mb-1">Per-GPU view</div>
+            <div className="font-bold text-white/70 mb-1.5 text-[10px] uppercase tracking-wider">Sharding</div>
             <div>
-              Parameters, optimizer state and gradients are sharded across TP×EP×PP, while
-              activations are only sharded across TP×PP. Data parallelism (DP) replicates
-              model state across replicas.
+              Weights, optimizer and gradients shard across TP x EP x PP.
+              Activations shard across TP x PP only. Data parallelism replicates model state.
             </div>
           </div>
         </div>
@@ -145,17 +142,31 @@ export const TabTrainingMemory: React.FC = () => {
   );
 };
 
+const SectionTitle: React.FC<{
+  title: string;
+  subtitle?: string;
+  right?: React.ReactNode;
+}> = ({ title, subtitle, right }) => (
+  <div className="flex items-start justify-between">
+    <div>
+      <div className="section-header text-accent/90">{title}</div>
+      {subtitle && <div className="section-subtitle">{subtitle}</div>}
+    </div>
+    {right && <div className="mt-0.5">{right}</div>}
+  </div>
+);
+
 interface KpiCardProps {
   label: string;
   value: string;
   sub?: string;
+  accent?: string;
 }
 
-const KpiCard: React.FC<KpiCardProps> = ({ label, value, sub }) => (
-  <div className="kpi-card">
+const KpiCard: React.FC<KpiCardProps> = ({ label, value, sub, accent = "border-l-accent" }) => (
+  <div className={`kpi-card border-l-2 ${accent}`}>
     <div className="kpi-label">{label}</div>
     <div className="kpi-value">{value}</div>
     {sub && <div className="kpi-subvalue">{sub}</div>}
   </div>
 );
-
