@@ -1,5 +1,5 @@
 import React, { useMemo } from "react";
-import { formatBigNumber, useConfigStore } from "../state/useConfigStore";
+import { formatBigNumber, useConfigStore, computeOverview } from "../state/useConfigStore";
 import { getGpuSpec } from "../lib/gpus";
 import {
   computeTrainingComputeMetrics,
@@ -47,25 +47,59 @@ function formatTB(v: number): string {
 }
 
 export const TabValidation: React.FC = () => {
-  const { overview, paperReference, preset, model, moe, training, inference } = useConfigStore();
-  const gpu = getGpuSpec(inference.gpuType);
+  const {
+    paperReference,
+    preset,
+    draftModel,
+    draftMoe,
+    draftTraining,
+    draftInference
+  } = useConfigStore();
+  const draftOverview = useMemo(
+    () => computeOverview(draftModel, draftMoe),
+    [draftModel, draftMoe]
+  );
+  const trainingGpuType = draftTraining.trainingGpuType ?? "H800-80G";
+  const mfu = draftTraining.mfu ?? 0.55;
+  const trainingGpu = getGpuSpec(trainingGpuType);
+  const inferenceGpu = getGpuSpec(draftInference.gpuType);
 
   const trainingCompute = useMemo(
-    () => computeTrainingComputeMetrics(model, moe, training, gpu),
-    [model, moe, training, gpu]
+    () =>
+      computeTrainingComputeMetrics(
+        draftModel,
+        draftMoe,
+        draftTraining,
+        trainingGpu,
+        mfu
+      ),
+    [draftModel, draftMoe, draftTraining, trainingGpu, mfu]
   );
   const trainingMemory = useMemo(
-    () => computeTrainingMemoryMetrics(model, moe, overview, training),
-    [model, moe, overview, training]
+    () =>
+      computeTrainingMemoryMetrics(
+        draftModel,
+        draftMoe,
+        draftOverview,
+        draftTraining
+      ),
+    [draftModel, draftMoe, draftOverview, draftTraining]
   );
   const inferenceMetrics = useMemo(
-    () => computeInferenceMetrics(model, moe, overview, inference, gpu),
-    [model, moe, overview, inference, gpu]
+    () =>
+      computeInferenceMetrics(
+        draftModel,
+        draftMoe,
+        draftOverview,
+        draftInference,
+        inferenceGpu
+      ),
+    [draftModel, draftMoe, draftOverview, draftInference, inferenceGpu]
   );
 
   const rows: ValidationRow[] = useMemo(() => {
-    const totalParamsB = overview.totalParams / 1e9;
-    const activeParamsB = overview.activeParams / 1e9;
+    const totalParamsB = draftOverview.totalParams / 1e9;
+    const activeParamsB = draftOverview.activeParams / 1e9;
     const kvCachePerTokenKB = inferenceMetrics.kvBytesPerToken / 1024;
     const weightsGB = inferenceMetrics.weightsBytes / 1e9;
     const peakTrainingGB = trainingMemory.peakBytes / 1e9;
@@ -140,7 +174,7 @@ export const TabValidation: React.FC = () => {
     }
 
     return result;
-  }, [overview, paperReference, trainingCompute, trainingMemory, inferenceMetrics]);
+  }, [draftOverview, paperReference, trainingCompute, trainingMemory, inferenceMetrics]);
 
   const deltas = rows.map((row) => {
     if (row.ourValue == null || row.paperValue == null || row.paperValue === 0) {
@@ -294,7 +328,7 @@ export const TabValidation: React.FC = () => {
               extensions we have not yet implemented.
             </li>
             <li>
-              GPU hours: our estimate uses ~35% MFU; papers report actual cluster usage.
+              GPU hours: our estimate uses the configured training GPU and MFU; papers report actual cluster usage.
               Inference weights: papers often cite bf16/fp16; our value depends on selected precision.
             </li>
             <li>

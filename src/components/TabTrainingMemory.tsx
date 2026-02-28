@@ -1,14 +1,23 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { ResponsiveContainer, BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip, Legend } from "recharts";
-import { useConfigStore, formatBigNumber } from "../state/useConfigStore";
+import { useConfigStore, formatBigNumber, computeOverview } from "../state/useConfigStore";
 import { getGpuSpec } from "../lib/gpus";
 import { computeTrainingMemoryMetrics } from "../lib/metrics";
 
 export const TabTrainingMemory: React.FC = () => {
-  const { model, moe, overview, training, inference } = useConfigStore();
-  const gpu = getGpuSpec(inference.gpuType);
+  const { draftModel, draftMoe, draftTraining } = useConfigStore();
+  const draftOverview = useMemo(
+    () => computeOverview(draftModel, draftMoe),
+    [draftModel, draftMoe]
+  );
+  const gpu = getGpuSpec(draftTraining.trainingGpuType ?? "H800-80G");
 
-  const mem = computeTrainingMemoryMetrics(model, moe, overview, training);
+  const mem = computeTrainingMemoryMetrics(
+    draftModel,
+    draftMoe,
+    draftOverview,
+    draftTraining
+  );
 
   const segments = [
     { name: "Parameters", bytes: mem.paramsBytes },
@@ -35,7 +44,7 @@ export const TabTrainingMemory: React.FC = () => {
           <div className="text-right text-[11px] text-textMuted">
             GPU: <span className="font-semibold">{gpu.name}</span>
             <div>
-              VRAM: {gpu.hbmGB} GB · Precision: {training.precision.toUpperCase()}
+              VRAM: {gpu.hbmGB} GB · Precision: {draftTraining.precision.toUpperCase()}
             </div>
           </div>
         </div>
@@ -44,12 +53,12 @@ export const TabTrainingMemory: React.FC = () => {
           <KpiCard
             label="Model parameters"
             value={`${(mem.paramsBytes / 1e9).toFixed(2)} GB`}
-            sub={`${formatBigNumber(overview.totalParams)} params`}
+            sub={`${formatBigNumber(draftOverview.totalParams)} params`}
           />
           <KpiCard
             label="Optimizer state"
             value={`${(mem.optimizerBytes / 1e9).toFixed(2)} GB`}
-            sub={training.optimizer === "adam" ? "Adam (m, v, master)" : "AdaFactor-style"}
+            sub={draftTraining.optimizer === "adam" ? "Adam (m, v, master)" : "AdaFactor-style"}
           />
           <KpiCard
             label="Gradients"

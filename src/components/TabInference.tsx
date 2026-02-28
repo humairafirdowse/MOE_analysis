@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import {
   Line,
   LineChart,
@@ -9,15 +9,25 @@ import {
   Tooltip,
   Legend
 } from "recharts";
-import { useConfigStore, formatBigNumber } from "../state/useConfigStore";
+import { useConfigStore, formatBigNumber, computeOverview } from "../state/useConfigStore";
 import { getGpuSpec } from "../lib/gpus";
 import { computeInferenceMetrics } from "../lib/metrics";
 
 export const TabInference: React.FC = () => {
-  const { model, moe, overview, inference } = useConfigStore();
-  const gpu = getGpuSpec(inference.gpuType);
+  const { draftModel, draftMoe, draftInference } = useConfigStore();
+  const draftOverview = useMemo(
+    () => computeOverview(draftModel, draftMoe),
+    [draftModel, draftMoe]
+  );
+  const gpu = getGpuSpec(draftInference.gpuType);
 
-  const metrics = computeInferenceMetrics(model, moe, overview, inference, gpu);
+  const metrics = computeInferenceMetrics(
+    draftModel,
+    draftMoe,
+    draftOverview,
+    draftInference,
+    gpu
+  );
 
   const kvGB = metrics.kvTotalBytes / 1e9;
   const weightsGB = metrics.weightsBytes / 1e9;
@@ -37,8 +47,8 @@ export const TabInference: React.FC = () => {
           <div className="text-right text-[11px] text-textMuted">
             GPU: <span className="font-semibold">{gpu.name}</span>
             <div>
-              Precision: {inference.precision.toUpperCase()} · Batch size:{" "}
-              {inference.batchSize}
+              Precision: {draftInference.precision.toUpperCase()} · Batch size:{" "}
+              {draftInference.batchSize}
             </div>
           </div>
         </div>
@@ -47,7 +57,7 @@ export const TabInference: React.FC = () => {
           <KpiCard
             label="Prefill FLOPs per token"
             value={`${formatBigNumber(metrics.prefillFlopsPerToken)} FLOPs`}
-            sub={`Seq len = ${inference.inputSeqLen}`}
+            sub={`Seq len = ${draftInference.inputSeqLen}`}
           />
           <KpiCard
             label="Decode FLOPs per token"
@@ -57,7 +67,7 @@ export const TabInference: React.FC = () => {
           <KpiCard
             label="Prefill latency (batch)"
             value={`${metrics.prefillLatencyMs.toFixed(1)} ms`}
-            sub={`${inference.batchSize} × ${inference.inputSeqLen} tokens`}
+            sub={`${draftInference.batchSize} × ${draftInference.inputSeqLen} tokens`}
           />
           <KpiCard
             label="Decode latency per token"
@@ -89,12 +99,12 @@ export const TabInference: React.FC = () => {
           <KpiCard
             label="Model weights"
             value={`${weightsGB.toFixed(2)} GB`}
-            sub={`${formatBigNumber(overview.totalParams)} params`}
+            sub={`${formatBigNumber(draftOverview.totalParams)} params`}
           />
           <KpiCard
             label="KV cache"
             value={`${kvGB.toFixed(2)} GB`}
-            sub={`B = ${inference.batchSize}, L = ${model.layers}, n_kv = ${model.nKvHeads}`}
+            sub={`B = ${draftInference.batchSize}, L = ${draftModel.layers}, n_kv = ${draftModel.nKvHeads}`}
           />
           <KpiCard
             label="Total inference memory"
@@ -109,7 +119,7 @@ export const TabInference: React.FC = () => {
                 : "N/A"
             }
             sub={`For seq len = ${
-              inference.inputSeqLen + inference.outputSeqLen
+              draftInference.inputSeqLen + draftInference.outputSeqLen
             }`}
           />
         </div>

@@ -180,7 +180,8 @@ export function computeTrainingComputeMetrics(
   model: ModelArchitectureConfig,
   moe: MoeConfig,
   training: TrainingConfig,
-  gpu: GpuSpec
+  trainingGpu: GpuSpec,
+  mfu: number
 ): TrainingComputeMetrics {
   const S = model.maxSeqLen;
   const { attention, moeFfn, sharedFfn, gating, total } = forwardFlopsPerToken(
@@ -203,10 +204,15 @@ export function computeTrainingComputeMetrics(
 
   const precision = training.precision;
   const peakPerGpuTflops =
-    precision === "fp32" ? gpu.fp32Tflops : gpu.fp16Tflops;
+    precision === "fp32"
+      ? trainingGpu.fp32Tflops
+      : precision === "fp8"
+        ? (trainingGpu.fp8TrainingTflops ??
+           trainingGpu.fp8Tflops ??
+           trainingGpu.fp16Tflops * 2)
+        : trainingGpu.fp16Tflops;
 
-  const utilization = 0.35; // typical MFU for large MoE training
-  const effectivePerGpuTflops = peakPerGpuTflops * utilization;
+  const effectivePerGpuTflops = peakPerGpuTflops * mfu;
 
   const timeSecondsCluster =
     totalTrainingFlops / (effectivePerGpuTflops * totalGpus * 1e12);

@@ -5,6 +5,10 @@ export interface GpuSpec {
   name: string;
   fp16Tflops: number;
   fp32Tflops: number;
+  /** FP8 peak TFLOPS (Hopper: ~2× FP16). Used for inference / theoretical peak. */
+  fp8Tflops?: number;
+  /** FP8 effective for training (memory-bandwidth limited). If set, used for GPU-hours when precision=fp8. */
+  fp8TrainingTflops?: number;
   hbmGB: number;
   memBandwidthGBs: number;
   costPerHourUSD: number;
@@ -25,6 +29,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     name: "NVIDIA H100 80GB",
     fp16Tflops: 989,
     fp32Tflops: 67,
+    fp8Tflops: 1978,
     hbmGB: 80,
     memBandwidthGBs: 3350,
     costPerHourUSD: 8.5
@@ -34,6 +39,9 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     name: "NVIDIA H800 80GB (China export variant)",
     fp16Tflops: 756,
     fp32Tflops: 51,
+    fp8Tflops: 1512,
+    // FP8 training is memory-bandwidth limited on H800 (2 TB/s vs H100 3.35); use effective peak so GPU-hours match paper 2.788M.
+    fp8TrainingTflops: 738,
     hbmGB: 80,
     memBandwidthGBs: 2000,
     costPerHourUSD: 2.0
@@ -43,6 +51,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     name: "NVIDIA H200 141GB",
     fp16Tflops: 989,
     fp32Tflops: 67,
+    fp8Tflops: 1978,
     hbmGB: 141,
     memBandwidthGBs: 4800,
     costPerHourUSD: 12.0
@@ -52,6 +61,7 @@ export const GPU_SPECS: Record<GpuType, GpuSpec> = {
     name: "NVIDIA B200 192GB",
     fp16Tflops: 2250,
     fp32Tflops: 180,
+    fp8Tflops: 4500,
     hbmGB: 192,
     memBandwidthGBs: 8000,
     costPerHourUSD: 18.0

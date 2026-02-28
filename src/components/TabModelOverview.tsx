@@ -1,47 +1,53 @@
-import React from "react";
+import React, { useMemo } from "react";
 import { Bar, BarChart, CartesianGrid, Legend, Tooltip, XAxis, YAxis, ResponsiveContainer } from "recharts";
-import { formatBigNumber, useConfigStore } from "../state/useConfigStore";
+import { formatBigNumber, useConfigStore, computeOverview } from "../state/useConfigStore";
 
 export const TabModelOverview: React.FC = () => {
-  const { model, moe, overview } = useConfigStore();
+  const { draftModel, draftMoe } = useConfigStore();
+  const draftOverview = useMemo(
+    () => computeOverview(draftModel, draftMoe),
+    [draftModel, draftMoe]
+  );
 
   const activeRatio =
-    overview.totalParams > 0 ? overview.activeParams / overview.totalParams : 0;
+    draftOverview.totalParams > 0
+      ? draftOverview.activeParams / draftOverview.totalParams
+      : 0;
 
-  const denseEquivalentParams = overview.activeParams;
+  const denseEquivalentParams = draftOverview.activeParams;
 
   const chartData = [
     {
       component: "Embedding",
-      total: overview.embeddingParams,
-      active: overview.embeddingParams
+      total: draftOverview.embeddingParams,
+      active: draftOverview.embeddingParams
     },
     {
       component: "Attention",
-      total: overview.attentionParams,
-      active: overview.attentionParams
+      total: draftOverview.attentionParams,
+      active: draftOverview.attentionParams
     },
     {
       component: "Routed experts",
-      total: overview.expertParams,
-      active: overview.expertParams
-        ? (overview.expertParams * moe.topK) / Math.max(moe.numExperts, 1)
+      total: draftOverview.expertParams,
+      active: draftOverview.expertParams
+        ? (draftOverview.expertParams * draftMoe.topK) / Math.max(draftMoe.numExperts, 1)
         : 0
     },
     {
       component: "Shared experts",
-      total: overview.sharedExpertParams,
-      active: overview.sharedExpertParams
+      total: draftOverview.sharedExpertParams,
+      active: draftOverview.sharedExpertParams
     },
     {
       component: "Output head",
-      total: overview.outputHeadParams,
-      active: overview.outputHeadParams
+      total: draftOverview.outputHeadParams,
+      active: draftOverview.outputHeadParams
     }
   ];
 
-  const totalParamsB = overview.totalParams / 1e9;
-  const activeParamsB = overview.activeParams / 1e9;
+  const totalParamsB = draftOverview.totalParams / 1e9;
+  const activeParamsB = draftOverview.activeParams / 1e9;
 
   return (
     <div className="flex flex-col gap-4">
@@ -56,20 +62,20 @@ export const TabModelOverview: React.FC = () => {
             </div>
           </div>
           <div className="text-right text-[11px] text-textMuted">
-            d_model={model.dModel} · L={model.layers} · E={moe.numExperts} · K=
-            {moe.topK}
+            d_model={draftModel.dModel} · L={draftModel.layers} · E={draftMoe.numExperts} · K=
+            {draftMoe.topK}
           </div>
         </div>
 
         <div className="kpi-grid">
           <KpiCard
             label="Total parameters"
-            value={`${formatBigNumber(overview.totalParams)} params`}
+            value={`${formatBigNumber(draftOverview.totalParams)} params`}
             sub={`${totalParamsB.toFixed(1)}B total`}
           />
           <KpiCard
             label="Active params per token"
-            value={`${formatBigNumber(overview.activeParams)} params`}
+            value={`${formatBigNumber(draftOverview.activeParams)} params`}
             sub={`${activeParamsB.toFixed(1)}B active`}
           />
           <KpiCard

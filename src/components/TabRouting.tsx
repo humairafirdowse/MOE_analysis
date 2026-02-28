@@ -1,12 +1,20 @@
-import React from "react";
+import React, { useMemo } from "react";
 import ReactECharts from "echarts-for-react";
-import { useConfigStore } from "../state/useConfigStore";
+import { useConfigStore, computeOverview } from "../state/useConfigStore";
 import { computeRoutingEfficiencyMetrics } from "../lib/metrics";
 
 export const TabRouting: React.FC = () => {
-  const { model, moe, overview, training } = useConfigStore();
-
-  const metrics = computeRoutingEfficiencyMetrics(model, moe, overview, training);
+  const { draftModel, draftMoe, draftTraining } = useConfigStore();
+  const draftOverview = useMemo(
+    () => computeOverview(draftModel, draftMoe),
+    [draftModel, draftMoe]
+  );
+  const metrics = computeRoutingEfficiencyMetrics(
+    draftModel,
+    draftMoe,
+    draftOverview,
+    draftTraining
+  );
 
   const moeActivePct = metrics.activeParamRatio * 100;
 
@@ -25,7 +33,7 @@ export const TabRouting: React.FC = () => {
             </div>
           </div>
           <div className="text-right text-[11px] text-textMuted">
-            E={moe.numExperts} · K={moe.topK} · L={model.layers}
+            E={draftMoe.numExperts} · K={draftMoe.topK} · L={draftModel.layers}
           </div>
         </div>
 
@@ -33,7 +41,7 @@ export const TabRouting: React.FC = () => {
           <KpiCard
             label="Active/Total parameter ratio"
             value={`${moeActivePct.toFixed(2)}%`}
-            sub={`K / E = ${moe.topK} / ${moe.numExperts || 1}`}
+            sub={`K / E = ${draftMoe.topK} / ${draftMoe.numExperts || 1}`}
           />
           <KpiCard
             label="Gating compute overhead"
@@ -79,10 +87,10 @@ export const TabRouting: React.FC = () => {
               <tr className="border-b border-borderSoft/30">
                 <td className="py-1.5 pr-3">This MoE model</td>
                 <td className="py-1.5 pr-3">
-                  {(overview.totalParams / 1e9).toFixed(1)} B
+                  {(draftOverview.totalParams / 1e9).toFixed(1)} B
                 </td>
                 <td className="py-1.5 pr-3">
-                  {(overview.activeParams / 1e9).toFixed(1)} B
+                  {(draftOverview.activeParams / 1e9).toFixed(1)} B
                 </td>
                 <td className="py-1.5 pr-3">
                   {(metrics.flopsMoePerToken / 1e9).toFixed(2)} B
@@ -91,10 +99,10 @@ export const TabRouting: React.FC = () => {
               <tr className="border-b border-borderSoft/30">
                 <td className="py-1.5 pr-3">Dense (same total params)</td>
                 <td className="py-1.5 pr-3">
-                  {(overview.totalParams / 1e9).toFixed(1)} B
+                  {(draftOverview.totalParams / 1e9).toFixed(1)} B
                 </td>
                 <td className="py-1.5 pr-3">
-                  {(overview.totalParams / 1e9).toFixed(1)} B
+                  {(draftOverview.totalParams / 1e9).toFixed(1)} B
                 </td>
                 <td className="py-1.5 pr-3">
                   {(metrics.flopsDenseTotalPerToken / 1e9).toFixed(2)} B
@@ -103,10 +111,10 @@ export const TabRouting: React.FC = () => {
               <tr>
                 <td className="py-1.5 pr-3">Dense (same active params)</td>
                 <td className="py-1.5 pr-3">
-                  {(overview.activeParams / 1e9).toFixed(1)} B
+                  {(draftOverview.activeParams / 1e9).toFixed(1)} B
                 </td>
                 <td className="py-1.5 pr-3">
-                  {(overview.activeParams / 1e9).toFixed(1)} B
+                  {(draftOverview.activeParams / 1e9).toFixed(1)} B
                 </td>
                 <td className="py-1.5 pr-3">
                   {(metrics.flopsDenseActivePerToken / 1e9).toFixed(2)} B

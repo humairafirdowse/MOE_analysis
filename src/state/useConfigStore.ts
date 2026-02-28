@@ -63,6 +63,10 @@ export interface TrainingConfig {
   gradPrecision: GradPrecision;
   activationCheckpointing: ActivationCheckpointingMode;
   useFlashAttention: boolean;
+  /** GPU type used for training (Fgpu). DeepSeek-V3 trained on H800, not H100. */
+  trainingGpuType: GpuType;
+  /** Model FLOPs Utilization (MFU). Critical for GPU-hours; DeepSeek-V3 reported ~0.55+. */
+  mfu: number;
   tp: number;
   ep: number;
   pp: number;
@@ -72,6 +76,7 @@ export interface TrainingConfig {
 export type GpuType =
   | "A100-80G"
   | "H100-80G"
+  | "H800-80G"
   | "H200-141G"
   | "B200-192G"
   | "RTX-4090"
@@ -198,7 +203,7 @@ function computePerExpertFfnParams(dModel: number, dFf: number) {
   return 3 * dModel * dFf;
 }
 
-function computeOverview(
+export function computeOverview(
   model: ModelArchitectureConfig,
   moe: MoeConfig
 ): DerivedOverviewMetrics {
@@ -334,6 +339,28 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           dSharedFf: 1536,
           expertGranularity: "fine"
         },
+        training: {
+          globalBatchTokens: 4096 * 4096,
+          totalTrainingTokens: 8e12,
+          precision: "bf16",
+          optimizer: "adam",
+          gradPrecision: "fp32",
+          activationCheckpointing: "selective",
+          useFlashAttention: true,
+          trainingGpuType: "A100-80G",
+          mfu: 0.4,
+          tp: 8,
+          ep: 16,
+          pp: 4,
+          dp: 16
+        },
+        inference: {
+          batchSize: 8,
+          inputSeqLen: 8192,
+          outputSeqLen: 256,
+          precision: "fp16",
+          gpuType: "A100-80G"
+        }
       },
       ref: {
         name: "DeepSeek-V2",
@@ -382,10 +409,12 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: true,
+          trainingGpuType: "H800-80G",
+          mfu: 0.55,
           tp: 8,
           ep: 32,
           pp: 8,
-          dp: 16
+          dp: 1  // Paper: 2048 H800 GPUs = 8×32×8×1
         },
         inference: {
           batchSize: 8,
@@ -435,6 +464,8 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: false,
+          trainingGpuType: "A100-80G",
+          mfu: 0.35,
           tp: 8,
           ep: 1,
           pp: 4,
@@ -481,6 +512,28 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           dSharedFf: 16384,
           expertGranularity: "coarse"
         },
+        training: {
+          globalBatchTokens: 4096 * 2048,
+          totalTrainingTokens: 4e12,
+          precision: "bf16",
+          optimizer: "adam",
+          gradPrecision: "fp32",
+          activationCheckpointing: "selective",
+          useFlashAttention: true,
+          trainingGpuType: "A100-80G",
+          mfu: 0.35,
+          tp: 8,
+          ep: 1,
+          pp: 8,
+          dp: 16
+        },
+        inference: {
+          batchSize: 4,
+          inputSeqLen: 8192,
+          outputSeqLen: 256,
+          precision: "fp16",
+          gpuType: "A100-80G"
+        }
       },
       ref: {
         name: "Mixtral 8x22B",
@@ -516,6 +569,28 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           dSharedFf: 4864,
           expertGranularity: "fine"
         },
+        training: {
+          globalBatchTokens: 4096 * 4096,
+          totalTrainingTokens: 8e12,
+          precision: "bf16",
+          optimizer: "adam",
+          gradPrecision: "fp32",
+          activationCheckpointing: "selective",
+          useFlashAttention: true,
+          trainingGpuType: "H100-80G",
+          mfu: 0.45,
+          tp: 8,
+          ep: 16,
+          pp: 4,
+          dp: 16
+        },
+        inference: {
+          batchSize: 8,
+          inputSeqLen: 4096,
+          outputSeqLen: 256,
+          precision: "fp16",
+          gpuType: "H100-80G"
+        }
       },
       ref: {
         name: "Snowflake Arctic",
@@ -568,10 +643,12 @@ const DEFAULT_TRAINING: TrainingConfig = {
   gradPrecision: "fp32",
   activationCheckpointing: "selective",
   useFlashAttention: true,
+  trainingGpuType: "H800-80G",
+  mfu: 0.55,
   tp: 8,
   ep: 32,
   pp: 8,
-  dp: 16
+  dp: 1  // DeepSeek-V3: 2048 GPUs
 };
 
 const DEFAULT_INFERENCE: InferenceConfig = {

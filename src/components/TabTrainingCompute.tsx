@@ -5,10 +5,18 @@ import { getGpuSpec } from "../lib/gpus";
 import { computeTrainingComputeMetrics } from "../lib/metrics";
 
 export const TabTrainingCompute: React.FC = () => {
-  const { model, moe, training, inference } = useConfigStore();
-  const gpu = getGpuSpec(inference.gpuType);
+  const { draftModel, draftMoe, draftTraining } = useConfigStore();
+  const trainingGpuType = draftTraining.trainingGpuType ?? "H800-80G";
+  const mfu = draftTraining.mfu ?? 0.55;
+  const trainingGpu = getGpuSpec(trainingGpuType);
 
-  const metrics = computeTrainingComputeMetrics(model, moe, training, gpu);
+  const metrics = computeTrainingComputeMetrics(
+    draftModel,
+    draftMoe,
+    draftTraining,
+    trainingGpu,
+    mfu
+  );
 
   const chartData = [
     {
@@ -34,6 +42,9 @@ export const TabTrainingCompute: React.FC = () => {
       ? metrics.totalFlopsPerToken / metrics.denseEquivalentFlopsPerToken
       : 1;
 
+  const formatGpuHours = (h: number) =>
+    h >= 1e6 ? (h / 1e6).toFixed(2) + "M" : h >= 1e3 ? (h / 1e3).toFixed(1) + "K" : h.toFixed(0);
+
   return (
     <div className="flex flex-col gap-4">
       <div className="section-card">
@@ -47,9 +58,9 @@ export const TabTrainingCompute: React.FC = () => {
             </div>
           </div>
           <div className="text-right text-[11px] text-textMuted">
-            GPU: <span className="font-semibold">{gpu.name}</span>
+            Training GPU: <span className="font-semibold">{trainingGpu.name}</span>
             <div>
-              Precision: {training.precision.toUpperCase()} ·{" "}
+              Precision: {draftTraining.precision.toUpperCase()} · MFU: {(mfu * 100).toFixed(0)}% ·{" "}
               {metrics.totalGpus} GPUs (TP×EP×PP×DP)
             </div>
           </div>
@@ -69,12 +80,12 @@ export const TabTrainingCompute: React.FC = () => {
           <KpiCard
             label="Total training FLOPs"
             value={`${formatBigNumber(metrics.totalTrainingFlops)} FLOPs`}
-            sub={`T = ${formatBigNumber(training.totalTrainingTokens)} tokens`}
+            sub={`T = ${formatBigNumber(draftTraining.totalTrainingTokens)} tokens`}
           />
           <KpiCard
             label="Approx. GPU-hours"
-            value={metrics.gpuHoursApprox.toFixed(0) + " GPU·h"}
-            sub={`${metrics.totalGpus} GPUs · ~35% MFU`}
+            value={formatGpuHours(metrics.gpuHoursApprox) + " GPU·h"}
+            sub={`${metrics.totalGpus} GPUs · ${(mfu * 100).toFixed(0)}% MFU`}
           />
           <KpiCard
             label="Dense equivalent FLOPs/token"
@@ -98,19 +109,25 @@ export const TabTrainingCompute: React.FC = () => {
 
         <div className="h-64">
           <ResponsiveContainer width="100%" height="100%">
-            <BarChart data={chartData} margin={{ top: 8, right: 16, bottom: 8, left: 80 }}>
-              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" />
+            <BarChart
+              data={chartData}
+              layout="vertical"
+              margin={{ top: 8, right: 16, bottom: 8, left: 180 }}
+            >
+              <CartesianGrid strokeDasharray="3 3" stroke="#1f2937" horizontal={false} />
               <XAxis
                 type="number"
                 dataKey="flops"
                 tickFormatter={(v) => `${(v / 1e9).toFixed(1)}B`}
                 stroke="#9ca3af"
+                domain={[0, "auto"]}
               />
               <YAxis
                 type="category"
                 dataKey="component"
                 stroke="#9ca3af"
-                width={140}
+                width={170}
+                tick={{ fontSize: 11 }}
               />
               <Tooltip
                 contentStyle={{
@@ -122,7 +139,7 @@ export const TabTrainingCompute: React.FC = () => {
                 formatter={(value: number) => [`${formatBigNumber(value)} FLOPs`, "FLOPs"]}
               />
               <Legend />
-              <Bar dataKey="flops" name="FLOPs per token" fill="#38bdf8" />
+              <Bar dataKey="flops" name="FLOPs per token" fill="#38bdf8" maxBarSize={48} radius={[0, 4, 4, 0]} />
             </BarChart>
           </ResponsiveContainer>
         </div>

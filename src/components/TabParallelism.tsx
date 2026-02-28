@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import {
   BarChart,
   Bar,
@@ -9,13 +9,21 @@ import {
   Tooltip,
   Legend
 } from "recharts";
-import { useConfigStore } from "../state/useConfigStore";
+import { useConfigStore, computeOverview } from "../state/useConfigStore";
 import { computeParallelismMetrics } from "../lib/metrics";
 
 export const TabParallelism: React.FC = () => {
-  const { model, moe, overview, training } = useConfigStore();
-
-  const metrics = computeParallelismMetrics(model, moe, overview, training);
+  const { draftModel, draftMoe, draftTraining } = useConfigStore();
+  const draftOverview = useMemo(
+    () => computeOverview(draftModel, draftMoe),
+    [draftModel, draftMoe]
+  );
+  const metrics = computeParallelismMetrics(
+    draftModel,
+    draftMoe,
+    draftOverview,
+    draftTraining
+  );
 
   const data = [
     {
@@ -49,7 +57,7 @@ export const TabParallelism: React.FC = () => {
             </div>
           </div>
           <div className="text-right text-[11px] text-textMuted">
-            TP={training.tp} · EP={training.ep} · PP={training.pp} · DP={training.dp}
+            TP={draftTraining.tp} · EP={draftTraining.ep} · PP={draftTraining.pp} · DP={draftTraining.dp}
             <div>
               Total GPUs:{" "}
               <span className="font-semibold">{metrics.totalGpus}</span>
@@ -66,12 +74,12 @@ export const TabParallelism: React.FC = () => {
           <KpiCard
             label="Experts per GPU"
             value={metrics.expertsPerGpu.toFixed(2)}
-            sub={`E = ${moe.numExperts}`}
+            sub={`E = ${draftMoe.numExperts}`}
           />
           <KpiCard
             label="Layers per GPU"
             value={metrics.layersPerGpu.toFixed(2)}
-            sub={`L = ${model.layers}`}
+            sub={`L = ${draftModel.layers}`}
           />
           <KpiCard
             label="Total communication / step"

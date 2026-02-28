@@ -20,6 +20,7 @@ const PRESET_LABELS: Record<PresetId, string> = {
 const gpuOptions: { id: GpuType; label: string }[] = [
   { id: "A100-80G", label: "A100-80G" },
   { id: "H100-80G", label: "H100-80G" },
+  { id: "H800-80G", label: "H800-80G" },
   { id: "H200-141G", label: "H200-141G" },
   { id: "B200-192G", label: "B200-192G" },
   { id: "RTX-4090", label: "RTX 4090" },
@@ -336,6 +337,31 @@ export const Sidebar: React.FC = () => {
               setTraining({ activationCheckpointing: value })
             }
           />
+        </div>
+        <div className="grid grid-cols-2 gap-2 mt-1.5">
+          <LabeledSelect<GpuType>
+            label="Training GPU (Fgpu)"
+            value={draftTraining.trainingGpuType ?? "H800-80G"}
+            options={gpuOptions}
+            onChange={(value) => setTraining({ trainingGpuType: value })}
+          />
+          <label className="block">
+            <div className="sidebar-label">MFU (U) — {((draftTraining.mfu ?? 0.55) * 100).toFixed(0)}%</div>
+            <input
+              type="number"
+              className="sidebar-input"
+              min={0.2}
+              max={0.7}
+              step={0.01}
+              value={draftTraining.mfu ?? 0.55}
+              onChange={(e) => {
+                const v = e.target.value;
+                const n = v === "" ? 0.55 : Number(v);
+                if (Number.isNaN(n)) return;
+                setTraining({ mfu: Math.max(0.2, Math.min(0.7, n)) });
+              }}
+            />
+          </label>
         </div>
         <label className="mt-1.5 flex items-center gap-2 text-[11px] text-textMuted cursor-pointer select-none">
           <input
