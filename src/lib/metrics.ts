@@ -392,6 +392,12 @@ export interface InferenceMetrics {
   totalPerGpuBytes: number;
   maxBatchSizeByMemory: number;
 
+  // Decode bytes breakdown (for display/debugging)
+  nonExpertActiveParams: number;
+  activeExpertParams: number;
+  activeSharedExpertParams: number;
+  decodeBytesPerGpuPerStep: number;
+
   // Sequence-length sweep
   seqSamples: {
     seqLen: number;
@@ -402,6 +408,80 @@ export interface InferenceMetrics {
   }[];
 }
 
+function computeExpertParamSplit(
+  model: ModelArchitectureConfig,
+  moe: MoeConfig,
+  overview: DerivedOverviewMetrics
+): {
+  activeRoutedExpertParams: number;
+  activeSharedExpertParams: number;
+  totalActiveExpertParams: number;
+  nonExpertActiveParams: number;
+} {
+  const numDenseLayers = model.firstKDenseReplace ?? 0;
+  const moeLayers = model.layersMoe ?? Math.max(0, model.layers - numDenseLayers);
+
+  // Routed experts: topK activated per token, SwiGLU = 3 * d_model * d_ff each
+  const perRoutedExpert = 3 * model.dModel * moe.dFf;
+  const activeRoutedExpertParams = moeLayers * moe.topK * perRoutedExpert;
+
+  // Shared experts: always active, SwiGLU = 3 * d_model * d_shared_ff each
+  const perSharedExpert = 3 * model.dModel * moe.dSharedFf;
+  const activeSharedExpertParams = moeLayers * moe.numSharedExperts * perSharedExpert;
+
+  // Total expert params that are active and sharded by TP × EP
+  const totalActiveExpertParams = activeRoutedExpertParams + activeSharedExpertParams;
+
+  // Everything else is non-expert and sharded by TP only
+  const nonExpertActiveParams = Math.max(0, overview.activeParams - totalActiveExpertParams);
+
+  return {
+    activeRoutedExpertParams,
+    activeSharedExpertParams,
+    totalActiveExpertParams,
+    nonExpertActiveParams
+  };
+}
+
+function computeKvBytesPerToken(
+  model: ModelArchitectureConfig,
+  bytesWeight: number
+): { kvBytesPerToken: number; kvDimPerLayer: number; useMLACache: boolean } {
+  const useMLACache =
+    model.useMLA === true &&
+    (model.mlaKvLoraRank ?? 0) > 0 &&
+    (model.mlaQkRopeHeadDim ?? 0) > 0;
+
+  const kvDimPerLayer = useMLACache
+    ? model.mlaKvLoraRank! + model.mlaQkRopeHeadDim!   // d_c + d_h^rope
+    : model.nKvHeads * model.dHead;                      // standard per-head
+
+  // MLA: single compressed vector (no 2× for K+V separately)
+  // Standard: 2× for separate K and V
+  const kvBytesPerToken = useMLACache
+    ? model.layers * kvDimPerLayer * bytesWeight
+    : 2 * model.layers * kvDimPerLayer * bytesWeight;
+
+  return { kvBytesPerToken, kvDimPerLayer, useMLACache };
+}
+
+function computeDecodeBytesPerGpu(
+  nonExpertActiveParams: number,
+  totalActiveExpertParams: number,
+  bytesWeight: number,
+  tp: number,
+  ep: number,
+  kvTotalBytes: number
+): { decodeBytesPerGpu: number; nonExpertBytesPerGpu: number; expertBytesPerGpu: number; kvPerGpuBytes: number } {
+  const nonExpertBytesPerGpu = (nonExpertActiveParams * bytesWeight) / tp;
+  const expertBytesPerGpu = (totalActiveExpertParams * bytesWeight) / (tp * ep);
+  const kvPerGpuBytes = kvTotalBytes / tp;
+
+  const decodeBytesPerGpu = nonExpertBytesPerGpu + expertBytesPerGpu + kvPerGpuBytes;
+
+  return { decodeBytesPerGpu, nonExpertBytesPerGpu, expertBytesPerGpu, kvPerGpuBytes };
+}
+
 export function computeInferenceMetrics(
   model: ModelArchitectureConfig,
   moe: MoeConfig,
@@ -409,8 +489,6 @@ export function computeInferenceMetrics(
   inference: InferenceConfig,
   gpu: GpuSpec
 ): InferenceMetrics {
-  const L = model.layers;
-
   const bytesWeight = bytesPerParamInference(inference.precision);
 
   const tp = Math.max(inference.tp ?? 1, 1);
@@ -419,16 +497,13 @@ export function computeInferenceMetrics(
   const dp = Math.max(inference.dp ?? 1, 1);
   const totalGpus = tp * ep * pp * dp;
 
+  const B = inference.batchSize;
   const S_in = inference.inputSeqLen;
   const S_out = inference.outputSeqLen;
   const S_total = S_in + S_out;
 
-  // Separate expert vs non-expert active params for EP-aware sharding
-  const numDenseLayers = model.firstKDenseReplace ?? 0;
-  const moeLayers = model.layersMoe ?? Math.max(0, model.layers - numDenseLayers);
-  const perExpert = 3 * model.dModel * moe.dFf; // SwiGLU
-  const activeExpertParams = moeLayers * moe.topK * perExpert;
-  const nonExpertActiveParams = Math.max(0, overview.activeParams - activeExpertParams);
+  // ── Expert vs non-expert param split ──
+  const paramSplit = computeExpertParamSplit(model, moe, overview);
 
   // ── Precision-aware peak TFLOPS ──
   const infPrecision = inference.precision;
@@ -444,14 +519,13 @@ export function computeInferenceMetrics(
   const forwardDecode = forwardFlopsPerToken(model, moe, S_total).total;
 
   // ── Prefill latency (compute-bound) ──
-  // TP shards compute; EP parallelises expert compute; PP is sequential per-stage
-  // Effective compute GPUs for a single request: tp * ep (PP stages are sequential)
+  // TP shards compute; EP parallelises expert compute; PP stages are sequential
   const computeGpus = tp * ep;
-  const prefillFlopsTotal = forwardPrefill * inference.batchSize * Math.max(S_in, 1);
+  const prefillFlopsTotal = forwardPrefill * B * Math.max(S_in, 1);
   const prefillLatencyMs =
     (prefillFlopsTotal / (computeGpus * effectiveTflops * 1e12)) * 1000;
 
-  const prefillTokensProduced = inference.batchSize * Math.max(S_in, 1);
+  const prefillTokensProduced = B * Math.max(S_in, 1);
   const prefillTokensPerSec =
     prefillLatencyMs > 0 ? prefillTokensProduced / (prefillLatencyMs / 1000) : 0;
 
@@ -459,34 +533,25 @@ export function computeInferenceMetrics(
   const memBW = gpu.memBandwidthGBs * 1e9; // bytes/s
 
   // ── KV cache ──
-  const useMLACache =
-    model.useMLA &&
-    (model.mlaKvLoraRank ?? 0) > 0 &&
-    (model.mlaQkRopeHeadDim ?? 0) > 0;
-  const kvDimPerLayer = useMLACache
-    ? model.mlaKvLoraRank! + model.mlaQkRopeHeadDim!
-    : model.nKvHeads * model.dHead;
-  const kvBytesPerToken = useMLACache
-    ? L * kvDimPerLayer * bytesWeight
-    : 2 * L * kvDimPerLayer * bytesWeight;
+  const { kvBytesPerToken } = computeKvBytesPerToken(model, bytesWeight);
+  const kvTotalBytes = kvBytesPerToken * B * Math.max(S_total, 1);
 
   // ── Decode latency (memory-bound) ──
-  // Per-GPU bytes read per decode step: sharded weights + sharded KV cache
-  // Non-expert weights sharded by TP; expert weights sharded by TP * EP; KV sharded by TP
-  const nonExpertBytesPerGpu = nonExpertActiveParams * bytesWeight / tp;
-  const expertBytesPerGpu = activeExpertParams * bytesWeight / (tp * ep);
-  const activeWeightBytesPerGpu = nonExpertBytesPerGpu + expertBytesPerGpu;
+  const decodeSharding = computeDecodeBytesPerGpu(
+    paramSplit.nonExpertActiveParams,
+    paramSplit.totalActiveExpertParams,
+    bytesWeight,
+    tp,
+    ep,
+    kvTotalBytes
+  );
 
-  const kvTotalBytes = kvBytesPerToken * inference.batchSize * Math.max(S_total, 1);
-  const kvPerGpuBytes = kvTotalBytes / tp;
-
-  const decodeBytesPerGpuPerStep = activeWeightBytesPerGpu + kvPerGpuBytes;
-  const decodeLatencySec = memBW > 0 ? decodeBytesPerGpuPerStep / memBW : 0;
+  const decodeLatencySec = memBW > 0 ? decodeSharding.decodeBytesPerGpu / memBW : 0;
   const decodeLatencyMsPerToken = decodeLatencySec * 1000;
 
-  // Each decode step produces batchSize tokens (one per sequence)
+  // Each decode step produces B tokens (one per sequence in the batch)
   const decodeTokensPerSec =
-    decodeLatencySec > 0 ? inference.batchSize / decodeLatencySec : 0;
+    decodeLatencySec > 0 ? B / decodeLatencySec : 0;
 
   // ── End-to-end timing ──
   const ttftMs = prefillLatencyMs;
@@ -500,7 +565,7 @@ export function computeInferenceMetrics(
 
   const modelParallelGpus = tp * ep * pp;
   const weightsPerGpuBytes = weightsBytes / modelParallelGpus;
-  const totalPerGpuBytes = weightsPerGpuBytes + kvPerGpuBytes;
+  const totalPerGpuBytes = weightsPerGpuBytes + decodeSharding.kvPerGpuBytes;
 
   // ── Max batch by GPU memory ──
   const availableBytesPerGpu = Math.max(gpu.hbmGB * 1e9 - weightsPerGpuBytes, 0);
@@ -516,16 +581,23 @@ export function computeInferenceMetrics(
   );
 
   for (const seqLen of samplePoints) {
-    const kvBytes = kvBytesPerToken * inference.batchSize * Math.max(seqLen, 1);
+    const kvBytes = kvBytesPerToken * B * Math.max(seqLen, 1);
     const kvGB = kvBytes / 1e9;
 
-    const kvPerGpuThisSeq = kvBytes / tp;
-    const decodeBytesThisSeq = activeWeightBytesPerGpu + kvPerGpuThisSeq;
-    const decodeMs = memBW > 0 ? (decodeBytesThisSeq / memBW) * 1000 : 0;
+    // Recompute decode bytes at this sequence length
+    const sweepSharding = computeDecodeBytesPerGpu(
+      paramSplit.nonExpertActiveParams,
+      paramSplit.totalActiveExpertParams,
+      bytesWeight,
+      tp,
+      ep,
+      kvBytes
+    );
+    const decodeMs = memBW > 0 ? (sweepSharding.decodeBytesPerGpu / memBW) * 1000 : 0;
 
     // TTFT at this sequence length (assuming entire seqLen is input)
     const fwdFlopsThisSeq = forwardFlopsPerToken(model, moe, seqLen).total;
-    const prefillFlopsThisSeq = fwdFlopsThisSeq * inference.batchSize * seqLen;
+    const prefillFlopsThisSeq = fwdFlopsThisSeq * B * seqLen;
     const ttftThisSeq = (prefillFlopsThisSeq / (computeGpus * effectiveTflops * 1e12)) * 1000;
 
     const totalTimeThisSeq = ttftThisSeq + S_out * decodeMs;
@@ -554,9 +626,13 @@ export function computeInferenceMetrics(
     kvTotalBytes,
     totalBytes,
     weightsPerGpuBytes,
-    kvPerGpuBytes,
+    kvPerGpuBytes: decodeSharding.kvPerGpuBytes,
     totalPerGpuBytes,
     maxBatchSizeByMemory,
+    nonExpertActiveParams: paramSplit.nonExpertActiveParams,
+    activeExpertParams: paramSplit.activeRoutedExpertParams,
+    activeSharedExpertParams: paramSplit.activeSharedExpertParams,
+    decodeBytesPerGpuPerStep: decodeSharding.decodeBytesPerGpu,
     seqSamples
   };
 }
@@ -776,8 +852,6 @@ export function computeHardwareEfficiencyMetrics(
         : trainingGpu.fp16Tflops;
 
   // HFU: includes recomputation FLOPs from activation checkpointing.
-  // none: no recompute → multiplier=1, sqrt/full: recompute full forward → multiplier=4/3
-  // selective: recompute only attention → multiplier = 1 + F_attn/(3F)
   let recomputeMultiplier = 1.0;
   switch (training.activationCheckpointing) {
     case "sqrt":
@@ -794,7 +868,7 @@ export function computeHardwareEfficiencyMetrics(
   }
   const hfu = mfu * recomputeMultiplier;
 
-  // Pipeline bubble: bubble_fraction = (PP - 1) / num_microbatches (1F1B schedule)
+  // Pipeline bubble
   const totalGpus = Math.max(1, training.tp * training.ep * training.pp * training.dp);
   const tokensPerDp = training.globalBatchTokens / Math.max(training.dp, 1);
   const numMicrobatches = Math.max(1, Math.floor(tokensPerDp / Math.max(S, 1)));
@@ -839,7 +913,6 @@ export function computeHardwareEfficiencyMetrics(
 
   const fwdInf = forwardFlopsPerToken(model, moe, inference.inputSeqLen);
   const weightsBytes = overview.totalParams * bytesWeight;
-  const activeWeightsBytes = overview.activeParams * bytesWeight;
 
   // Prefill: batch × seq tokens processed, weights read once
   const prefillTotalFlops = fwdInf.total * inference.batchSize * Math.max(inference.inputSeqLen, 1);
@@ -848,20 +921,25 @@ export function computeHardwareEfficiencyMetrics(
     ? prefillTotalFlops / prefillBytesAccessed
     : 0;
 
-  // Decode: single token, read active weights + KV cache
-  const useMLACache =
-    model.useMLA &&
-    (model.mlaKvLoraRank ?? 0) > 0 &&
-    (model.mlaQkRopeHeadDim ?? 0) > 0;
-  const kvDimPerLayer = useMLACache
-    ? model.mlaKvLoraRank! + model.mlaQkRopeHeadDim!
-    : model.nKvHeads * model.dHead;
-  const kvBytesPerToken = useMLACache
-    ? model.layers * kvDimPerLayer * bytesWeight
-    : 2 * model.layers * kvDimPerLayer * bytesWeight;
+  // Decode: single token, read active weights + KV cache (using proper sharding)
+  const paramSplit = computeExpertParamSplit(model, moe, overview);
+  const { kvBytesPerToken } = computeKvBytesPerToken(model, bytesWeight);
   const S_total = inference.inputSeqLen + inference.outputSeqLen;
   const kvCacheBytesTotal = kvBytesPerToken * inference.batchSize * S_total;
-  const decodeBytesAccessed = activeWeightsBytes + kvCacheBytesTotal;
+
+  // For roofline, use per-GPU bytes (sharded)
+  const tp = Math.max(inference.tp ?? 1, 1);
+  const ep = Math.max(inference.ep ?? 1, 1);
+  const decodeSharding = computeDecodeBytesPerGpu(
+    paramSplit.nonExpertActiveParams,
+    paramSplit.totalActiveExpertParams,
+    bytesWeight,
+    tp,
+    ep,
+    kvCacheBytesTotal
+  );
+  const decodeBytesAccessed = decodeSharding.decodeBytesPerGpu;
+
   const decodeFwdFlops = fwdInf.total;
   const decodeArithmeticIntensity = decodeBytesAccessed > 0
     ? decodeFwdFlops / decodeBytesAccessed
@@ -879,8 +957,8 @@ export function computeHardwareEfficiencyMetrics(
   const decodeBound: "compute" | "memory" =
     decodeArithmeticIntensity >= ridgePointFlopsPerByte ? "compute" : "memory";
 
-  // GPU utilization: actual FLOPS / peak FLOPS
-  const decodeLatencySec = activeWeightsBytes / memBWBytesPerSec;
+  // GPU utilization
+  const decodeLatencySec = memBWBytesPerSec > 0 ? decodeBytesAccessed / memBWBytesPerSec : 0;
   const decodeActualFlops = decodeLatencySec > 0 ? decodeFwdFlops / decodeLatencySec : 0;
   const decodeGpuUtil = peakInfTflops > 0
     ? (decodeActualFlops / (peakInfTflops * 1e12)) * 100
@@ -945,6 +1023,10 @@ export interface CostAnalysisMetrics {
   costPer1MInputTokens: number;
   costPer1MOutputTokens: number;
 
+  // Replica GPU counts
+  nPrefillGpus: number;
+  nDecodeGpus: number;
+
   // Batch size sweep
   batchSweep: {
     batchSize: number;
@@ -990,22 +1072,8 @@ export function computeCostAnalysisMetrics(
 
   // ── Inference costs ─────────────────────────────────────
 
-  const infCostPerSec = inferenceGpu.costPerHourUSD / 3600;
   const memBW = inferenceGpu.memBandwidthGBs * 1e9;
-  const bytesWeight = bytesPerParamInference(inference.precision);
   const fwdFlops = forwardFlopsPerToken(model, moe, inference.inputSeqLen).total;
-
-  // MLA-aware KV cache per token
-  const useMLACache =
-    model.useMLA &&
-    (model.mlaKvLoraRank ?? 0) > 0 &&
-    (model.mlaQkRopeHeadDim ?? 0) > 0;
-  const kvDimPerLayer = useMLACache
-    ? model.mlaKvLoraRank! + model.mlaQkRopeHeadDim!
-    : model.nKvHeads * model.dHead;
-  const kvBytesPerTokenFn = (bw: number) => useMLACache
-    ? model.layers * kvDimPerLayer * bw
-    : 2 * model.layers * kvDimPerLayer * bw;
 
   const peakInfTflops = (inference.precision === "fp8" || inference.precision === "int8")
     ? (inferenceGpu.fp8Tflops ?? inferenceGpu.fp16Tflops)
@@ -1013,28 +1081,49 @@ export function computeCostAnalysisMetrics(
   const prefillUtil = 0.4;
   const effectiveInfTflops = peakInfTflops * prefillUtil;
 
+  const tp = Math.max(inference.tp ?? 1, 1);
+  const ep = Math.max(inference.ep ?? 1, 1);
+  const pp = Math.max(inference.pp ?? 1, 1);
+  const nPrefillGpus = tp * ep * pp;
+  const nDecodeGpus = tp * ep * pp;
+
+  const paramSplit = computeExpertParamSplit(model, moe, overview);
+
   // Helper: compute inference cost at a given batch size and precision
   function inferCostAtBatchPrec(batchSize: number, prec: PrecisionInference) {
     const bpp = bytesPerParamInference(prec);
-    const activeWeightBytes = overview.activeParams * bpp;
     const totalWeightBytes = overview.totalParams * bpp;
-    const kvPerToken = kvBytesPerTokenFn(bpp);
+    const { kvBytesPerToken: kvPerToken } = computeKvBytesPerToken(model, bpp);
     const S_total = inference.inputSeqLen + inference.outputSeqLen;
 
     // Prefill: compute-bound, process B × S_in tokens
+    const computeGpus = tp * ep;
     const prefillFlopsTotal = fwdFlops * batchSize * Math.max(inference.inputSeqLen, 1);
-    const prefillTimeSec = prefillFlopsTotal / (effectiveInfTflops * 1e12);
+    const prefillTimeSec = prefillFlopsTotal / (computeGpus * effectiveInfTflops * 1e12);
     const prefillTokensProduced = batchSize * Math.max(inference.inputSeqLen, 1);
     const prefillTPS = prefillTimeSec > 0 ? prefillTokensProduced / prefillTimeSec : 0;
 
-    // Decode: memory-bound, read weights + KV cache per step, produces B tokens
-    const decodeBytesPerStep = activeWeightBytes + kvPerToken * batchSize * S_total;
-    const decodeTimeSec = memBW > 0 ? decodeBytesPerStep / memBW : 0;
+    // Decode: memory-bound with proper EP sharding
+    const kvTotal = kvPerToken * batchSize * S_total;
+    const decodeSharding = computeDecodeBytesPerGpu(
+      paramSplit.nonExpertActiveParams,
+      paramSplit.totalActiveExpertParams,
+      bpp,
+      tp,
+      ep,
+      kvTotal
+    );
+    const decodeTimeSec = memBW > 0 ? decodeSharding.decodeBytesPerGpu / memBW : 0;
     const decodeTPS = decodeTimeSec > 0 ? batchSize / decodeTimeSec : 0;
 
+    // Cost per 1M tokens = (10^6 / TPS) * (costPerGpuHour / 3600) * N_replica
     const gpuCostPerSec = inferenceGpu.costPerHourUSD / 3600;
-    const costPer1MInput = prefillTPS > 0 ? (1e6 / prefillTPS) * gpuCostPerSec : 0;
-    const costPer1MOutput = decodeTPS > 0 ? (1e6 / decodeTPS) * gpuCostPerSec : 0;
+    const costPer1MInput = prefillTPS > 0
+      ? (1e6 / prefillTPS) * gpuCostPerSec * nPrefillGpus
+      : 0;
+    const costPer1MOutput = decodeTPS > 0
+      ? (1e6 / decodeTPS) * gpuCostPerSec * nDecodeGpus
+      : 0;
 
     return {
       prefillTPS,
@@ -1095,6 +1184,8 @@ export function computeCostAnalysisMetrics(
     decodeTokensPerSec: base.decodeTPS,
     costPer1MInputTokens: base.costPer1MInput,
     costPer1MOutputTokens: base.costPer1MOutput,
+    nPrefillGpus,
+    nDecodeGpus,
     batchSweep,
     quantSweep
   };
@@ -1112,4 +1203,3 @@ function normalTail(z: number): number {
       t * (-0.3565638 + t * (1.781478 + t * (-1.821256 + t * 1.330274))));
   return z < 0 ? 1 - prob : prob;
 }
-

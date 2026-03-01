@@ -438,15 +438,21 @@ Prefill tokens/s = $B \cdot S_{\text{in}} / t_{\text{prefill}}$.
 
 Decode: memory-bound. Per decode step the UI reads (sharded) active weights + KV cache. Non-expert active params sharded by TP; expert active params sharded by TP$\times$EP. Bytes per GPU per step:
 \[
-B_{\text{decode,per-gpu}} = \frac{P_{\text{non-expert,active}} \cdot b_{\text{inf}}}{\mathrm{TP}}
-+ \frac{P_{\text{expert,active}} \cdot b_{\text{inf}}}{\mathrm{TP} \cdot \mathrm{EP}}
-+ \frac{M_{\text{kv,total}}}{\mathrm{TP}}.
+B_{\mathrm{decode,per\text{-}gpu}} = \frac{P_{\mathrm{non\text{-}expert,active}} \cdot b_{\mathrm{inf}}}{\mathrm{TP}} + \frac{P_{\mathrm{expert,active}} \cdot b_{\mathrm{inf}}}{\mathrm{TP} \cdot \mathrm{EP}} + \frac{B \cdot S \cdot L \cdot d_c \cdot b_{\mathrm{inf}}}{\mathrm{TP}}
 \]
-Decode latency per token (per GPU): $t_{\text{decode}} = B_{\text{decode,per-gpu}} / \mathrm{BW}_{\text{mem}}$. Each step produces $B$ tokens (batch size), so
+where the third term is the MLA KV cache (compressed latent $d_c$ per token per layer).
+
+Decode latency and throughput:
 \[
-\text{decode tokens/s} = \frac{B}{t_{\text{decode}}}.
+t_{\mathrm{decode}} = \frac{B_{\mathrm{decode,per\text{-}gpu}}}{\mathrm{BW}_{\mathrm{mem}}}, \qquad \text{decode tokens/s} = \frac{B}{t_{\mathrm{decode}}}
 \]
-TTFT = $t_{\text{prefill}}$; inter-token latency = $t_{\text{decode}}$; total generation time = TTFT + $S_{\text{out}} \cdot t_{\text{decode}}$.
+
+End-to-end timing:
+\[
+\mathrm{TTFT} = t_{\mathrm{prefill}}, \qquad \text{inter-token latency} = t_{\mathrm{decode}}, \qquad \text{total generation time} = t_{\mathrm{prefill}} + S_{\mathrm{out}} \cdot t_{\mathrm{decode}}
+\]
+
+Compute-bound crossover: decode remains memory-bound while $\displaystyle\frac{2 \, B \, P_{\mathrm{active}}}{B_{\mathrm{decode,per\text{-}gpu}}} < \frac{F_{\mathrm{gpu}}}{\mathrm{BW}_{\mathrm{mem}}}$.
 
 \subsection{Weights and KV Cache}
 
@@ -659,29 +665,45 @@ Decode GPU utilization (UI): $\text{decodeLatencySec} = M_{\text{active,weights}
 \section{Cost Analysis (UI)}
 
 \subsection{Training Cost}
-
-$\text{costPerGpuHour}$ = user or preset GPU \$/hr.
+$\mathrm{costPerGpuHour}$ = user or preset GPU \$/hr.
 \[
-\text{Total training cost} = \text{GPU-hours} \times \text{costPerGpuHour}.
+\text{Total training cost} = \text{GPU-hours} \times \mathrm{costPerGpuHour}.
 \]
 \[
-\text{Cost per trillion tokens} = \frac{\text{Total training cost}}{T / 10^{12}}.
+\text{Cost per trillion tokens} = \frac{\text{Total training cost}}{T/10^{12}}.
 \]
 \[
-\text{Wall-clock hours} = \frac{\text{GPU-hours}}{N_{\text{gpus}}},
-\quad
-\text{Wall-clock days} = \frac{\text{Wall-clock hours}}{24}.
+\text{Wall-clock hours} = \frac{\text{GPU-hours}}{N_{\mathrm{gpus}}}, \qquad \text{Wall-clock days} = \frac{\text{Wall-clock hours}}{24}.
 \]
 
 \subsection{Inference Cost}
-
-Per 1M input tokens: $\text{costPer1MInput} = (10^6 / \text{prefillTokensPerSec}) \times (\text{costPerGpuHour} / 3600)$. Per 1M output tokens: $\text{costPer1MOutput} = (10^6 / \text{decodeTokensPerSec}) \times (\text{costPerGpuHour} / 3600)$.
-
-Batch-size sweep: same formulas at each batch size; decode bytes and thus decode tokens/s depend on $B$. Quantization sweep: same at each precision (weights and bytes per param change; decode tokens/s and \$/1M output change).
+Let $N_{\mathrm{prefill}}$ = GPUs per prefill replica and $N_{\mathrm{decode}}$ = GPUs per decode replica (these may differ in disaggregated serving). Per 1M input tokens:
+\[
+\mathrm{costPer1MInput} = \frac{10^{6}}{\mathrm{prefillTokensPerSec}} \times \frac{\mathrm{costPerGpuHour}}{3600} \times N_{\mathrm{prefill}}.
+\]
+Per 1M output tokens:
+\[
+\mathrm{costPer1MOutput} = \frac{10^{6}}{\mathrm{decodeTokensPerSec}} \times \frac{\mathrm{costPerGpuHour}}{3600} \times N_{\mathrm{decode}}.
+\]
 
 \subsection{Monthly Serving Estimate}
-
-GPUs needed: $\text{reqPerSec} = \text{reqPerDay} / 86400$, $\text{secPerReq} = \text{secPerInputToken} \cdot \text{avgInputTok} + \text{secPerOutputToken} \cdot \text{avgOutputTok}$, $\text{gpusNeeded} = \lceil \text{reqPerSec} \cdot \text{secPerReq} \rceil$. Daily cost = (inputTokensPerDay/1e6)$\cdot$costPer1MInput + (outputTokensPerDay/1e6)$\cdot$costPer1MOutput; monthly = daily $\times$ 30.
+\[
+\mathrm{reqPerSec} = \frac{\mathrm{reqPerDay}}{86400}, \qquad \mathrm{secPerReq} = t_{\mathrm{prefill}}(\mathrm{avgInputTok}) + \mathrm{avgOutputTok} \cdot t_{\mathrm{decode}}.
+\]
+Size each pool independently:
+\[
+\mathrm{prefillReplicas} = \left\lceil \mathrm{reqPerSec} \cdot t_{\mathrm{prefill}}(\mathrm{avgInputTok}) \right\rceil, \qquad \mathrm{decodeReplicas} = \left\lceil \mathrm{reqPerSec} \cdot \mathrm{avgOutputTok} \cdot t_{\mathrm{decode}} \right\rceil.
+\]
+\[
+\mathrm{gpusNeeded} = \mathrm{prefillReplicas} \times N_{\mathrm{prefill}} + \mathrm{decodeReplicas} \times N_{\mathrm{decode}}.
+\]
+Daily cost:
+\[
+\text{daily} = \frac{\mathrm{inputTokensPerDay}}{10^{6}} \cdot \mathrm{costPer1MInput} + \frac{\mathrm{outputTokensPerDay}}{10^{6}} \cdot \mathrm{costPer1MOutput}.
+\]
+\[
+\text{monthly} = \text{daily} \times 30.
+\]
 
 \section{Validation Metrics}
 
