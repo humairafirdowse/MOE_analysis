@@ -369,10 +369,11 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: true,
-          trainingGpuType: "A100-80G",
+          trainingGpuType: "H800-80G",
           mfu: 0.4,
           tp: 8,
-          ep: 16,
+          // DeepSeek-V2 paper (Infrastructure): routed experts deployed on D=8 devices.
+          ep: 8,
           pp: 4,
           dp: 16
         },
@@ -382,7 +383,8 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           outputSeqLen: 256,
           precision: "fp16",
           gpuType: "A100-80G",
-          tp: 4,
+          // DeepSeek-V2 HF README: BF16 inference requires 80GB × 8 GPUs.
+          tp: 8,
           ep: 1,
           pp: 1,
           dp: 1
@@ -500,7 +502,7 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: false,
-          trainingGpuType: "A100-80G",
+          trainingGpuType: "H100-80G",
           mfu: 0.35,
           tp: 8,
           ep: 1,
@@ -561,7 +563,7 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: true,
-          trainingGpuType: "A100-80G",
+          trainingGpuType: "H100-80G",
           mfu: 0.35,
           tp: 8,
           ep: 1,
