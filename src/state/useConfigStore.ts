@@ -9,6 +9,10 @@ export type TrainingOptimizer = "adam" | "adafactor";
 
 export type GradPrecision = "fp32" | "bf16";
 
+export type AdamMomentPrecision = "fp32" | "bf16";
+
+export type ZeroStage = 0 | 1 | 2 | 3;
+
 export type ActivationCheckpointingMode = "none" | "sqrt" | "selective";
 
 export interface ModelArchitectureConfig {
@@ -61,6 +65,25 @@ export interface TrainingConfig {
   precision: PrecisionTraining;
   optimizer: TrainingOptimizer;
   gradPrecision: GradPrecision;
+  /**
+   * Precision for Adam first/second moment accumulators.
+   * "bf16" = master_fp32(4) + m_bf16(2) + v_bf16(2) = 8 B/param (DeepSeek-V3 style).
+   * "fp32" = master_fp32(4) + m_fp32(4) + v_fp32(4) = 12 B/param (classic mixed-precision).
+   * Ignored when optimizer !== "adam" or precision === "fp32".
+   */
+  adamMomentPrecision: AdamMomentPrecision;
+  /**
+   * ZeRO optimizer stage.
+   * 0 = no sharding; 1 = optimizer states sharded across DP;
+   * 2 = + gradients; 3 = + parameters.
+   */
+  zeroStage: ZeroStage;
+  /**
+   * Number of sequences in one pipeline micro-batch.
+   * Activation memory is computed for this many sequences, not the full global batch.
+   * DeepSeek-V3 typically uses 1-4 sequences per micro-batch with large gradient accumulation.
+   */
+  microBatchSeqCount: number;
   activationCheckpointing: ActivationCheckpointingMode;
   useFlashAttention: boolean;
   /** GPU type used for training (Fgpu). DeepSeek-V3 trained on H800, not H100. */
@@ -366,6 +389,9 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           totalTrainingTokens: 8e12,
           precision: "bf16",
           optimizer: "adam",
+          adamMomentPrecision: "bf16",
+          zeroStage: 1,
+          microBatchSeqCount: 1,
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: true,
@@ -435,6 +461,11 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           totalTrainingTokens: 14.8e12,
           precision: "fp8",
           optimizer: "adam",
+          // DeepSeek-V3 Technical Report §3.3: m and v stored in BF16.
+          adamMomentPrecision: "bf16",
+          zeroStage: 1,
+          // With 2048 GPUs and PP=8, gradient accumulation over ~1024 micro-batches.
+          microBatchSeqCount: 1,
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: true,
@@ -499,6 +530,9 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           totalTrainingTokens: 2e12,
           precision: "bf16",
           optimizer: "adam",
+          adamMomentPrecision: "fp32",
+          zeroStage: 1,
+          microBatchSeqCount: 1,
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: false,
@@ -560,6 +594,9 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           totalTrainingTokens: 4e12,
           precision: "bf16",
           optimizer: "adam",
+          adamMomentPrecision: "fp32",
+          zeroStage: 1,
+          microBatchSeqCount: 1,
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: true,
@@ -630,6 +667,9 @@ const DEFAULT_TRAINING: TrainingConfig = {
   totalTrainingTokens: 14.8e12,
   precision: "fp8",
   optimizer: "adam",
+  adamMomentPrecision: "bf16",
+  zeroStage: 1,
+  microBatchSeqCount: 1,
   gradPrecision: "fp32",
   activationCheckpointing: "selective",
   useFlashAttention: true,

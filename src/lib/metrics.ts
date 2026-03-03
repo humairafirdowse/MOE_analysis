@@ -277,70 +277,146 @@ export function computeTrainingMemoryMetrics(
 
   const paramsBytes = totalParams * bytesParam;
 
+  // ── Optimizer state bytes ───────────────────────────────────────────────────
+  // Adam byte budget per parameter:
+  //   pure FP32 training        → m_fp32(4) + v_fp32(4)          =  8 B/param
+  //   mixed-precision, fp32 m/v → master_fp32(4)+m_fp32(4)+v_fp32(4) = 12 B/param
+  //   mixed-precision, bf16 m/v → master_fp32(4)+m_bf16(2)+v_bf16(2) =  8 B/param
+  // DeepSeek-V3 Technical Report §3.3 explicitly stores m and v in BF16.
   let optimizerBytesPerParam: number;
   if (training.optimizer === "adam") {
-    // fp32: m(4) + v(4) = 8; mixed-precision: master_fp32(4) + m(4) + v(4) = 12
-    optimizerBytesPerParam = training.precision === "fp32" ? 8 : 12;
+    if (training.precision === "fp32") {
+      optimizerBytesPerParam = 8; // m_fp32 + v_fp32, no master copy needed
+    } else if (training.adamMomentPrecision === "bf16") {
+      optimizerBytesPerParam = 8; // master_fp32 + m_bf16 + v_bf16
+    } else {
+      optimizerBytesPerParam = 12; // master_fp32 + m_fp32 + v_fp32 (classic)
+    }
   } else {
-    optimizerBytesPerParam = 4;
+    optimizerBytesPerParam = 4; // adafactor: single FP32 accumulator
   }
   const optimizerBytes = totalParams * optimizerBytesPerParam;
 
   const gradientBytes =
     totalParams * (training.gradPrecision === "bf16" ? 2 : 4);
 
-  // Activation memory (approximate, based on Python engine structure).
+  // ── Activation memory ───────────────────────────────────────────────────────
+  // Activations are sized for one pipeline micro-batch, not the full global
+  // batch.  Using globalBatchTokens would overcount by the number of gradient-
+  // accumulation steps (e.g. ×1024 for DeepSeek-V3).
+  //
+  // EP sharding of stored activations:
+  //   The residual stream (dModel-dimensional per token) always lives on the
+  //   HOME GPU — the GPU that received the token from the previous pipeline
+  //   stage.  It is never touched by EP dispatch, so it does NOT shard by EP.
+  //
+  //   Expert FFN intermediates (gate/up projections) live on the EXPERT GPU
+  //   after the All-to-All dispatch.  Whether they are stored depends on the
+  //   checkpointing mode:
+  //     • "none"      → stored on expert GPU → EP-sharded  (÷ TP×EP×PP)
+  //     • "sqrt"      → stored on expert GPU → EP-sharded  (÷ TP×EP×PP)
+  //     • "selective" → recomputed via a second All-to-All → NOT stored at all
+  //
+  //   Attention activations (if not using FlashAttention) live on the home
+  //   GPU and are therefore NOT EP-sharded.  With selective checkpointing
+  //   attention is the component being recomputed, so it is also not stored.
+
   const seqLen = model.maxSeqLen;
   const d = model.dModel;
   const nLayers = model.layers;
+  const microBatch = Math.max(1, training.microBatchSeqCount ?? 1);
 
-  const tokensPerBatch = training.globalBatchTokens;
-  const batchSizeSeq = Math.max(1, tokensPerBatch / Math.max(seqLen, 1));
-
-  const attnAct =
+  // Per-layer activation sizes (micro-batch scope)
+  const attnActPerLayer =
     training.useFlashAttention
       ? 0
-      : 2 *
-        batchSizeSeq *
-        model.nHeads *
-        seqLen *
-        seqLen *
-        bytesParam;
-  const ffnAct =
-    batchSizeSeq *
-    seqLen *
-    moe.dFf *
-    Math.max(moe.topK, 1) *
-    bytesParam;
-  const residual =
-    batchSizeSeq * seqLen * d * bytesParam * 2; // residual stream
-  const actPerLayer = attnAct + ffnAct + residual;
+      : 2 * microBatch * model.nHeads * seqLen * seqLen * bytesParam;
 
-  let activationsBytes: number;
+  const residualActPerLayer = microBatch * seqLen * d * bytesParam * 2;
+
+  // Expert FFN intermediates per layer — only stored without selective checkpointing.
+  // Shape approximation: topK dispatched tokens × dFf × bytes, averaged over EP ranks.
+  const expertFfnActPerLayer =
+    microBatch * seqLen * moe.dFf * Math.max(moe.topK, 1) * bytesParam;
+
+  // expertActivationsBytes  → lives on EXPERT GPU  → will be ÷ denomEP
+  // homeActivationsBytes    → lives on HOME  GPU   → will be ÷ denomNoEP
+  let expertActivationsBytes: number;
+  let homeActivationsBytes: number;
+
   switch (training.activationCheckpointing) {
     case "none":
-      activationsBytes = actPerLayer * nLayers;
+      // Everything stored.
+      expertActivationsBytes = expertFfnActPerLayer * nLayers;
+      homeActivationsBytes   = (attnActPerLayer + residualActPerLayer) * nLayers;
       break;
-    case "sqrt":
-      activationsBytes =
-        actPerLayer * 2 * Math.ceil(Math.sqrt(nLayers || 1));
-      break;
-    case "selective":
-    default: {
-      const actPerLayerSelective = ffnAct + residual;
-      activationsBytes = actPerLayerSelective * nLayers;
+    case "sqrt": {
+      const sqrtLayers = 2 * Math.ceil(Math.sqrt(nLayers || 1));
+      expertActivationsBytes = expertFfnActPerLayer * sqrtLayers;
+      homeActivationsBytes   = (attnActPerLayer + residualActPerLayer) * sqrtLayers;
       break;
     }
+    case "selective":
+    default:
+      // Expert FFN recomputed via a second All-to-All → zero storage cost.
+      // Attention recomputed (selective skips it).
+      // Only the residual stream is retained on the home GPU.
+      expertActivationsBytes = 0;
+      homeActivationsBytes   = residualActPerLayer * nLayers;
+      break;
   }
+
+  const activationsBytes = expertActivationsBytes + homeActivationsBytes;
 
   const peakBytes = paramsBytes + optimizerBytes + gradientBytes + activationsBytes;
 
-  const denomParams = Math.max(training.tp * training.ep * training.pp, 1);
-  const denomActs = Math.max(training.tp * training.pp, 1);
+  // ── Per-GPU sharding ────────────────────────────────────────────────────────
+  //
+  // Routed expert weights (~655 B for DeepSeek-V3) are owned by specific EP
+  // ranks, so they divide by TP × EP × PP.
+  //
+  // All other weights — attention (MLA), shared experts, dense FFN layers,
+  // embeddings, output head, norms, gating — are REPLICATED across every EP
+  // rank because every token must pass through them regardless of routing.
+  // These divide by TP × PP only.
+  //
+  // ZeRO-1 shards optimizer states across DP; ZeRO-2 also shards gradients;
+  // ZeRO-3 also shards parameters.  Non-expert weights are replicated across
+  // EP, so their ZeRO shard denominator is TP × PP × DP (not × EP).
+
+  const expertParamCount    = overview.expertParams;
+  const nonExpertParamCount = Math.max(0, totalParams - expertParamCount);
+
+  const gradBytesPerParam = training.gradPrecision === "bf16" ? 2 : 4;
+
+  const denomEP  = Math.max(training.tp * training.ep * training.pp, 1); // expert MP group
+  const denomNoEP = Math.max(training.tp * training.pp, 1);               // non-expert MP group
+  const denomDP  = Math.max(training.dp, 1);
+  const zeroStage = training.zeroStage ?? 0;
+
+  // zeroDenom: apply ZeRO-stage DP sharding to a model-parallel base denominator.
+  const zeroDenom = (base: number, minStage: number) =>
+    zeroStage >= minStage ? base * denomDP : base;
+
+  // Expert params/states — EP-sharded
+  const expertParamsPerGpu    = expertParamCount * bytesParam             / zeroDenom(denomEP, 3);
+  const expertOptimizerPerGpu = expertParamCount * optimizerBytesPerParam / zeroDenom(denomEP, 1);
+  const expertGradsPerGpu     = expertParamCount * gradBytesPerParam      / zeroDenom(denomEP, 2);
+
+  // Non-expert params/states — replicated across EP, NOT divided by EP
+  const nonExpertParamsPerGpu    = nonExpertParamCount * bytesParam             / zeroDenom(denomNoEP, 3);
+  const nonExpertOptimizerPerGpu = nonExpertParamCount * optimizerBytesPerParam / zeroDenom(denomNoEP, 1);
+  const nonExpertGradsPerGpu     = nonExpertParamCount * gradBytesPerParam      / zeroDenom(denomNoEP, 2);
 
   const paramsStatesPerGpu =
-    (paramsBytes + optimizerBytes + gradientBytes) / denomParams;
-  const activationsPerGpu = activationsBytes / denomActs;
+    expertParamsPerGpu + expertOptimizerPerGpu + expertGradsPerGpu +
+    nonExpertParamsPerGpu + nonExpertOptimizerPerGpu + nonExpertGradsPerGpu;
+
+  // Expert FFN acts: stored on expert GPU → EP-sharded (denomEP = TP×EP×PP).
+  // Home (residual/attn) acts: stored on home GPU → NOT EP-sharded (denomNoEP = TP×PP).
+  const activationsPerGpu =
+    expertActivationsBytes / denomEP +
+    homeActivationsBytes   / denomNoEP;
 
   const perGpuBytes = paramsStatesPerGpu + activationsPerGpu;
 

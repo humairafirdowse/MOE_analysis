@@ -1,10 +1,12 @@
 import React, { useState } from "react";
 import {
+  AdamMomentPrecision,
   GpuType,
   PrecisionInference,
   PrecisionTraining,
   PresetId,
   TrainingOptimizer,
+  ZeroStage,
   useConfigStore
 } from "../state/useConfigStore";
 
@@ -339,19 +341,49 @@ export const Sidebar: React.FC = () => {
               ]}
               onChange={(value) => setTraining({ gradPrecision: value })}
             />
-            <LabeledSelect<"none" | "sqrt" | "selective">
-              label="Checkpointing"
-              value={draftTraining.activationCheckpointing}
+            <LabeledSelect<AdamMomentPrecision>
+              label="Adam m/v prec"
+              value={draftTraining.adamMomentPrecision}
               options={[
-                { id: "none", label: "None" },
-                { id: "sqrt", label: "Uniform (√L)" },
-                { id: "selective", label: "Selective" }
+                { id: "fp32", label: "FP32" },
+                { id: "bf16", label: "BF16" }
               ]}
-              onChange={(value) =>
-                setTraining({ activationCheckpointing: value })
-              }
+              onChange={(value) => setTraining({ adamMomentPrecision: value })}
             />
           </Row2>
+          <Row2>
+            <LabeledSelect<ZeroStage>
+              label="ZeRO stage"
+              value={draftTraining.zeroStage}
+              options={[
+                { id: 0, label: "0 – None" },
+                { id: 1, label: "1 – Opt states" },
+                { id: 2, label: "2 – + Grads" },
+                { id: 3, label: "3 – + Params" }
+              ]}
+              onChange={(value) => setTraining({ zeroStage: value })}
+            />
+            <LabeledInput
+              label="Micro-batch seqs"
+              value={draftTraining.microBatchSeqCount}
+              onChange={handleNumberChange<typeof draftTraining>(
+                setTraining,
+                "microBatchSeqCount"
+              )}
+            />
+          </Row2>
+          <LabeledSelect<"none" | "sqrt" | "selective">
+            label="Checkpointing"
+            value={draftTraining.activationCheckpointing}
+            options={[
+              { id: "none", label: "None" },
+              { id: "sqrt", label: "Uniform (√L)" },
+              { id: "selective", label: "Selective" }
+            ]}
+            onChange={(value) =>
+              setTraining({ activationCheckpointing: value })
+            }
+          />
 
           <Checkbox
             label="FlashAttention (skip attn activation storage)"
@@ -610,19 +642,19 @@ const LabeledInput: React.FC<LabeledInputProps> = ({
   </label>
 );
 
-interface LabeledSelectOption<T extends string> {
+interface LabeledSelectOption<T extends string | number> {
   id: T;
   label: string;
 }
 
-interface LabeledSelectProps<T extends string> {
+interface LabeledSelectProps<T extends string | number> {
   label: string;
   value: T;
   options: LabeledSelectOption<T>[];
   onChange: (value: T) => void;
 }
 
-const LabeledSelect = <T extends string>({
+const LabeledSelect = <T extends string | number>({
   label,
   value,
   options,
@@ -633,7 +665,10 @@ const LabeledSelect = <T extends string>({
     <select
       className="sidebar-select"
       value={value}
-      onChange={(e) => onChange(e.target.value as T)}
+      onChange={(e) => {
+        const raw = e.target.value;
+        onChange((typeof value === "number" ? Number(raw) : raw) as T);
+      }}
     >
       {options.map((opt) => (
         <option key={opt.id} value={opt.id}>
