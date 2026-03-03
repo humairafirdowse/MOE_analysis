@@ -457,35 +457,37 @@ const PAPER_PRESETS: Record<PresetId, { config: Partial<ConfigState>; ref?: Pape
           expertGranularity: "fine"
         },
         training: {
-          globalBatchTokens: 4096 * 8192,
+          // Paper §4.2: batch size 3072→15360 seq; max seq 4K. Peak: 15360×4096.
+          globalBatchTokens: 4096 * 15360,
           totalTrainingTokens: 14.8e12,
           precision: "fp8",
           optimizer: "adam",
           // DeepSeek-V3 Technical Report §3.3: m and v stored in BF16.
           adamMomentPrecision: "bf16",
           zeroStage: 1,
-          // With 2048 GPUs and PP=8, gradient accumulation over ~1024 micro-batches.
           microBatchSeqCount: 1,
           gradPrecision: "fp32",
           activationCheckpointing: "selective",
           useFlashAttention: true,
           trainingGpuType: "H800-80G",
           mfu: 0.55,
-          tp: 8,
-          ep: 32,
-          pp: 8,
-          dp: 1  // Paper: 2048 H800 GPUs = 8×32×8×1
+          // Paper §3.2: 16-way PP, 64-way EP, ZeRO-1 DP; no TP. 2048 GPUs = 1×64×16×2
+          tp: 1,
+          ep: 64,
+          pp: 16,
+          dp: 2
         },
         inference: {
           batchSize: 8,
           inputSeqLen: 4096,
           outputSeqLen: 256,
           precision: "fp16",
-          gpuType: "H100-80G",
-          tp: 8,
-          ep: 4,
+          // Paper §3.4: deployed on H800. Prefill min 32 GPUs: TP4, DP8, EP32.
+          gpuType: "H800-80G",
+          tp: 4,
+          ep: 32,
           pp: 1,
-          dp: 1
+          dp: 8
         }
       },
       ref: {
@@ -663,7 +665,7 @@ const DEFAULT_MOE: MoeConfig = {
 };
 
 const DEFAULT_TRAINING: TrainingConfig = {
-  globalBatchTokens: 4096 * 8192,
+  globalBatchTokens: 4096 * 15360,
   totalTrainingTokens: 14.8e12,
   precision: "fp8",
   optimizer: "adam",
@@ -675,10 +677,10 @@ const DEFAULT_TRAINING: TrainingConfig = {
   useFlashAttention: true,
   trainingGpuType: "H800-80G",
   mfu: 0.55,
-  tp: 8,
-  ep: 32,
-  pp: 8,
-  dp: 1  // DeepSeek-V3: 2048 GPUs
+  tp: 1,
+  ep: 64,
+  pp: 16,
+  dp: 2
 };
 
 const DEFAULT_INFERENCE: InferenceConfig = {
@@ -686,11 +688,11 @@ const DEFAULT_INFERENCE: InferenceConfig = {
   inputSeqLen: 4096,
   outputSeqLen: 256,
   precision: "fp16",
-  gpuType: "H100-80G",
-  tp: 8,
-  ep: 4,
+  gpuType: "H800-80G",
+  tp: 4,
+  ep: 32,
   pp: 1,
-  dp: 1
+  dp: 8
 };
 
 const DEFAULT_STATE: Omit<

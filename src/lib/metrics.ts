@@ -497,19 +497,27 @@ function computeExpertParamSplit(
   const numDenseLayers = model.firstKDenseReplace ?? 0;
   const moeLayers = model.layersMoe ?? Math.max(0, model.layers - numDenseLayers);
 
-  // Routed experts: topK activated per token, SwiGLU = 3 * d_model * d_ff each
+  // Routed experts: topK activated per token, SwiGLU = 3 * d_model * d_ff each.
+  // These ARE sharded by EP — each EP rank owns only E/EP experts and processes
+  // ~topK/EP token-expert assignments, so bandwidth divides by TP × EP.
   const perRoutedExpert = 3 * model.dModel * moe.dFf;
   const activeRoutedExpertParams = moeLayers * moe.topK * perRoutedExpert;
 
-  // Shared experts: always active, SwiGLU = 3 * d_model * d_shared_ff each
+  // Shared experts: always active, SwiGLU = 3 * d_model * d_shared_ff each.
+  // Shared experts are REPLICATED across all EP ranks (every token uses them,
+  // so every EP rank must hold and compute them locally).  They shard by TP only.
   const perSharedExpert = 3 * model.dModel * moe.dSharedFf;
   const activeSharedExpertParams = moeLayers * moe.numSharedExperts * perSharedExpert;
 
-  // Total expert params that are active and sharded by TP × EP
-  const totalActiveExpertParams = activeRoutedExpertParams + activeSharedExpertParams;
+  // EP-sharded bucket: routed experts only (÷ TP × EP in bandwidth calculation).
+  const totalActiveExpertParams = activeRoutedExpertParams;
 
-  // Everything else is non-expert and sharded by TP only
-  const nonExpertActiveParams = Math.max(0, overview.activeParams - totalActiveExpertParams);
+  // Non-EP-sharded bucket: shared experts + attention + embeddings + norms + gating
+  // (÷ TP only in bandwidth calculation).
+  const nonExpertActiveParams = Math.max(
+    0,
+    overview.activeParams - activeRoutedExpertParams
+  );
 
   return {
     activeRoutedExpertParams,
@@ -635,17 +643,36 @@ export function computeInferenceMetrics(
   const totalDecodeTimeMs = S_out * decodeLatencyMsPerToken;
   const totalGenerationTimeMs = ttftMs + totalDecodeTimeMs;
 
-  // ── Memory totals ──
+  // ── Memory totals (cluster) ──
   const weightsBytes = overview.totalParams * bytesWeight;
   const totalBytes = weightsBytes + kvTotalBytes;
 
-  const modelParallelGpus = tp * ep * pp;
-  const weightsPerGpuBytes = weightsBytes / modelParallelGpus;
-  const totalPerGpuBytes = weightsPerGpuBytes + decodeSharding.kvPerGpuBytes;
+  // ── Per-GPU weight capacity ─────────────────────────────────────────────────
+  // Routed expert weights are EP-sharded (each EP rank owns E/EP experts).
+  // All other weights — attention, shared experts, norms, embeddings, output
+  // head, gating — are replicated across every EP rank and do NOT divide by EP.
+  // Both classes divide by TP (tensor-parallel within each group) and PP
+  // (each pipeline stage holds 1/PP of layers).
+  const expertWeightsBytes    = overview.expertParams * bytesWeight;
+  const nonExpertWeightsBytes = Math.max(0, overview.totalParams - overview.expertParams) * bytesWeight;
+
+  const weightsPerGpuBytes =
+    expertWeightsBytes    / Math.max(tp * ep * pp, 1) +
+    nonExpertWeightsBytes / Math.max(tp * pp, 1);
+
+  // ── Per-GPU KV capacity ─────────────────────────────────────────────────────
+  // KV cache for capacity purposes: each pipeline stage holds 1/PP of the
+  // attention layers, and TP shards the heads within that stage.
+  // (Note: computeDecodeBytesPerGpu.kvPerGpuBytes = kvTotal/tp is intentionally
+  //  NOT divided by PP — that value is used for bandwidth/latency where
+  //  sequential PP stages don't reduce total bytes streamed per decode step.)
+  const kvCapacityPerGpu = kvTotalBytes / Math.max(tp * pp, 1);
+
+  const totalPerGpuBytes = weightsPerGpuBytes + kvCapacityPerGpu;
 
   // ── Max batch by GPU memory ──
   const availableBytesPerGpu = Math.max(gpu.hbmGB * 1e9 - weightsPerGpuBytes, 0);
-  const kvPerBatchPerSeq = kvBytesPerToken * Math.max(S_total, 1) / tp;
+  const kvPerBatchPerSeq = kvBytesPerToken * Math.max(S_total, 1) / Math.max(tp * pp, 1);
   const maxBatchSizeByMemory =
     kvPerBatchPerSeq > 0 ? Math.floor(availableBytesPerGpu / kvPerBatchPerSeq) : 0;
 
