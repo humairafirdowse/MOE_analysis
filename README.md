@@ -68,6 +68,5 @@ The validation tab currently compares parameter counts against hardcoded paper v
 - **Mixtral 8x7B**: 46.7B total, ~12.9B active (for reference)
 
 FLOPs, training memory, inference latency, and communication metrics will be added in
-subsequent phases, using your existing Python engine (`main_dummy.py`) as the reference
-math implementation.
+subsequent phases, wired to a Python analysis engine when that layer is added.
 
